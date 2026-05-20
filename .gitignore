@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+.venv/
+.env
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.log
+.agent_secret.key
+.continue/
+node_modules/
+dist/
+.vite/
