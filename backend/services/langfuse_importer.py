@@ -107,7 +107,17 @@ async def _fetch_observations(
             if cursor:
                 request_params["cursor"] = cursor
             response = await client.get(url, params=request_params, auth=(public_key, secret_key))
-            response.raise_for_status()
+            try:
+                response.raise_for_status()
+            except httpx.HTTPStatusError as exc:
+                status_code = exc.response.status_code
+                if status_code in {401, 403}:
+                    raise LangfuseImportError(
+                        "Langfuse rejected the saved credentials for this agent. Update the public and secret keys, then import again."
+                    ) from exc
+                raise LangfuseImportError(
+                    f"Langfuse import failed with HTTP {status_code}: {exc.response.text[:300]}"
+                ) from exc
             payload = response.json()
             observations.extend(payload.get("data", []))
             cursor = (payload.get("meta") or {}).get("cursor")

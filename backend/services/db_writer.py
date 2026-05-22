@@ -2,6 +2,7 @@ import json
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any
+import uuid
 
 import asyncpg
 
@@ -52,6 +53,23 @@ CREATE INDEX IF NOT EXISTS idx_agent_integrations_provider ON agent_integrations
 
 ALTER TABLE agent_events ADD COLUMN IF NOT EXISTS input_payload JSONB;
 ALTER TABLE agent_events ADD COLUMN IF NOT EXISTS output_payload JSONB;
+ALTER TABLE agent_integrations ADD COLUMN IF NOT EXISTS agent_code TEXT;
+ALTER TABLE agent_integrations ADD COLUMN IF NOT EXISTS agent_description TEXT;
+ALTER TABLE agent_integrations ADD COLUMN IF NOT EXISTS agent_type TEXT;
+ALTER TABLE agent_integrations ADD COLUMN IF NOT EXISTS use_case_summary TEXT;
+ALTER TABLE agent_integrations ADD COLUMN IF NOT EXISTS business_objective TEXT;
+ALTER TABLE agent_integrations ADD COLUMN IF NOT EXISTS lifecycle_status TEXT DEFAULT 'Draft';
+ALTER TABLE agent_integrations ADD COLUMN IF NOT EXISTS business_criticality TEXT;
+ALTER TABLE agent_integrations ADD COLUMN IF NOT EXISTS autonomy_level TEXT;
+ALTER TABLE agent_integrations ADD COLUMN IF NOT EXISTS data_classification TEXT;
+ALTER TABLE agent_integrations ADD COLUMN IF NOT EXISTS access_scope TEXT;
+ALTER TABLE agent_integrations ADD COLUMN IF NOT EXISTS deployment_status TEXT DEFAULT 'Draft';
+ALTER TABLE agent_integrations ADD COLUMN IF NOT EXISTS monitoring_required BOOLEAN DEFAULT FALSE;
+ALTER TABLE agent_integrations ADD COLUMN IF NOT EXISTS audit_logging_required BOOLEAN DEFAULT FALSE;
+ALTER TABLE agent_integrations ADD COLUMN IF NOT EXISTS human_approval_required BOOLEAN DEFAULT FALSE;
+ALTER TABLE agent_integrations ADD COLUMN IF NOT EXISTS pii_usage BOOLEAN DEFAULT FALSE;
+ALTER TABLE agent_integrations ADD COLUMN IF NOT EXISTS sensitive_data_usage BOOLEAN DEFAULT FALSE;
+ALTER TABLE agent_integrations ADD COLUMN IF NOT EXISTS governance_profile JSONB NOT NULL DEFAULT '{}'::jsonb;
 
 CREATE TABLE IF NOT EXISTS node_type (
     id TEXT PRIMARY KEY,
@@ -101,6 +119,21 @@ WHERE parent_id IS NULL;
 CREATE INDEX IF NOT EXISTS idx_org_node_tenant ON organization_node(tenant_id);
 CREATE INDEX IF NOT EXISTS idx_org_node_parent ON organization_node(parent_id);
 CREATE INDEX IF NOT EXISTS idx_org_node_status ON organization_node(status);
+
+CREATE TABLE IF NOT EXISTS agent_node_mapping (
+    id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    agent_id TEXT NOT NULL REFERENCES agent_integrations(agent_id) ON DELETE CASCADE,
+    node_id TEXT NOT NULL REFERENCES organization_node(id),
+    placement_type TEXT NOT NULL DEFAULT 'Primary',
+    status TEXT NOT NULL DEFAULT 'Active',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (tenant_id, agent_id, node_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_agent_node_mapping_agent ON agent_node_mapping(agent_id);
+CREATE INDEX IF NOT EXISTS idx_agent_node_mapping_node ON agent_node_mapping(node_id);
 
 CREATE TABLE IF NOT EXISTS org_audit_history (
     id BIGSERIAL PRIMARY KEY,
@@ -202,6 +235,8 @@ def _row_to_dict(row: asyncpg.Record) -> dict[str, Any]:
         data["updated_at"] = data["updated_at"].isoformat()
     if isinstance(data.get("metadata"), str):
         data["metadata"] = json.loads(data["metadata"])
+    if isinstance(data.get("governance_profile"), str):
+        data["governance_profile"] = json.loads(data["governance_profile"])
     if isinstance(data.get("input_payload"), str):
         data["input_payload"] = json.loads(data["input_payload"])
     if isinstance(data.get("output_payload"), str):
@@ -238,15 +273,25 @@ async def upsert_agent_integration(
     public_key_encrypted: str,
     secret_key_encrypted: str,
     metadata: dict[str, Any] | None = None,
+    profile: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    profile = profile or {}
     async with _pool_or_raise().acquire() as conn:
         row = await conn.fetchrow(
             """
             INSERT INTO agent_integrations (
                 agent_id, display_name, provider, base_url,
-                public_key_encrypted, secret_key_encrypted, metadata
+                public_key_encrypted, secret_key_encrypted, metadata,
+                agent_code, agent_description, agent_type, use_case_summary,
+                business_objective, lifecycle_status, business_criticality,
+                autonomy_level, data_classification, access_scope, deployment_status,
+                monitoring_required, audit_logging_required, human_approval_required,
+                pii_usage, sensitive_data_usage, governance_profile
             )
-            VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb)
+            VALUES (
+                $1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,
+                $19,$20,$21,$22,$23,$24::jsonb
+            )
             ON CONFLICT (agent_id) DO UPDATE SET
                 display_name = EXCLUDED.display_name,
                 provider = EXCLUDED.provider,
@@ -254,6 +299,23 @@ async def upsert_agent_integration(
                 public_key_encrypted = EXCLUDED.public_key_encrypted,
                 secret_key_encrypted = EXCLUDED.secret_key_encrypted,
                 metadata = EXCLUDED.metadata,
+                agent_code = EXCLUDED.agent_code,
+                agent_description = EXCLUDED.agent_description,
+                agent_type = EXCLUDED.agent_type,
+                use_case_summary = EXCLUDED.use_case_summary,
+                business_objective = EXCLUDED.business_objective,
+                lifecycle_status = EXCLUDED.lifecycle_status,
+                business_criticality = EXCLUDED.business_criticality,
+                autonomy_level = EXCLUDED.autonomy_level,
+                data_classification = EXCLUDED.data_classification,
+                access_scope = EXCLUDED.access_scope,
+                deployment_status = EXCLUDED.deployment_status,
+                monitoring_required = EXCLUDED.monitoring_required,
+                audit_logging_required = EXCLUDED.audit_logging_required,
+                human_approval_required = EXCLUDED.human_approval_required,
+                pii_usage = EXCLUDED.pii_usage,
+                sensitive_data_usage = EXCLUDED.sensitive_data_usage,
+                governance_profile = EXCLUDED.governance_profile,
                 updated_at = NOW()
             RETURNING *
             """,
@@ -264,6 +326,23 @@ async def upsert_agent_integration(
             public_key_encrypted,
             secret_key_encrypted,
             json.dumps(metadata or {}),
+            profile.get("agent_code"),
+            profile.get("agent_description"),
+            profile.get("agent_type"),
+            profile.get("use_case_summary"),
+            profile.get("business_objective"),
+            profile.get("lifecycle_status") or "Draft",
+            profile.get("business_criticality"),
+            profile.get("autonomy_level"),
+            profile.get("data_classification"),
+            profile.get("access_scope"),
+            profile.get("deployment_status") or "Draft",
+            bool(profile.get("monitoring_required")),
+            bool(profile.get("audit_logging_required")),
+            bool(profile.get("human_approval_required")),
+            bool(profile.get("pii_usage")),
+            bool(profile.get("sensitive_data_usage")),
+            json.dumps(profile.get("governance_profile") or {}),
         )
     return _row_to_dict(row)
 
@@ -274,6 +353,11 @@ async def fetch_agent_integrations() -> list[dict[str, Any]]:
             """
             SELECT
                 agent_id, display_name, provider, base_url, created_at, updated_at, metadata,
+                agent_code, agent_description, agent_type, use_case_summary,
+                business_objective, lifecycle_status, business_criticality,
+                autonomy_level, data_classification, access_scope, deployment_status,
+                monitoring_required, audit_logging_required, human_approval_required,
+                pii_usage, sensitive_data_usage, governance_profile,
                 public_key_encrypted IS NOT NULL AS public_key_configured,
                 secret_key_encrypted IS NOT NULL AS secret_key_configured
             FROM agent_integrations
@@ -290,6 +374,81 @@ async def fetch_agent_integration(agent_id: str) -> dict[str, Any] | None:
             agent_id,
         )
     return _row_to_dict(row) if row else None
+
+
+async def replace_agent_node_mappings(
+    agent_id: str,
+    mappings: list[dict[str, Any]],
+    tenant_id: str = "default",
+) -> None:
+    async with _pool_or_raise().acquire() as conn:
+        async with conn.transaction():
+            await conn.execute("DELETE FROM agent_node_mapping WHERE tenant_id=$1 AND agent_id=$2", tenant_id, agent_id)
+            seen: set[str] = set()
+            for mapping in mappings:
+                node_id = mapping.get("node_id")
+                if not node_id or node_id in seen:
+                    continue
+                seen.add(node_id)
+                node_exists = await conn.fetchval(
+                    "SELECT EXISTS(SELECT 1 FROM organization_node WHERE tenant_id=$1 AND id=$2 AND status <> 'Archived')",
+                    tenant_id,
+                    node_id,
+                )
+                if not node_exists:
+                    raise ValueError("Selected organization node does not exist or is archived.")
+                await conn.execute(
+                    """
+                    INSERT INTO agent_node_mapping (id, tenant_id, agent_id, node_id, placement_type, status)
+                    VALUES ($1,$2,$3,$4,$5,$6)
+                    """,
+                    str(uuid.uuid4()),
+                    tenant_id,
+                    agent_id,
+                    node_id,
+                    mapping.get("placement_type") or "Primary",
+                    mapping.get("status") or "Active",
+                )
+
+
+async def fetch_agent_node_mappings(agent_id: str, tenant_id: str = "default") -> list[dict[str, Any]]:
+    async with _pool_or_raise().acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT
+                m.id, m.tenant_id, m.agent_id, m.node_id, m.placement_type, m.status,
+                m.created_at, m.updated_at, n.node_name, n.node_code, n.level,
+                t.type_name AS node_type
+            FROM agent_node_mapping m
+            JOIN organization_node n ON n.id=m.node_id AND n.tenant_id=m.tenant_id
+            JOIN node_type t ON t.id=n.node_type_id
+            WHERE m.tenant_id=$1 AND m.agent_id=$2
+            ORDER BY CASE m.placement_type WHEN 'Primary' THEN 0 WHEN 'Shared' THEN 1 ELSE 2 END, n.level, n.node_name
+            """,
+            tenant_id,
+            agent_id,
+        )
+        mappings = [_row_to_dict(row) for row in rows]
+        for mapping in mappings:
+            path_rows = await conn.fetch(
+                """
+                WITH RECURSIVE path AS (
+                    SELECT id, parent_id, node_name, node_code, 1 AS depth
+                    FROM organization_node
+                    WHERE id=$1 AND tenant_id=$2
+                    UNION ALL
+                    SELECT n.id, n.parent_id, n.node_name, n.node_code, path.depth + 1
+                    FROM organization_node n
+                    JOIN path ON path.parent_id = n.id
+                    WHERE n.tenant_id=$2
+                )
+                SELECT id, node_name, node_code FROM path ORDER BY depth DESC
+                """,
+                mapping["node_id"],
+                tenant_id,
+            )
+            mapping["breadcrumb"] = [dict(row) for row in path_rows]
+    return mappings
 
 
 async def delete_agent_integration(agent_id: str) -> bool:

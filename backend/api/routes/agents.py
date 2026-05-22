@@ -30,6 +30,8 @@ async def onboard_agent(request: AgentOnboardRequest):
             public_key=request.public_key,
             secret_key=request.secret_key,
             metadata=request.metadata,
+            profile=request.profile,
+            node_mappings=[mapping.model_dump() for mapping in request.node_mappings],
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -46,6 +48,8 @@ async def edit_agent(agent_id: str, request: AgentUpdateRequest):
             public_key=request.public_key,
             secret_key=request.secret_key,
             metadata=request.metadata,
+            profile=request.profile,
+            node_mappings=[mapping.model_dump() for mapping in request.node_mappings] if request.node_mappings is not None else None,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -85,4 +89,4 @@ async def import_agent_langfuse(agent_id: str, request: LangfuseImportRequest):
             max_pages=request.max_pages,
         )
     except LangfuseImportError as exc:
-        return {"error": str(exc)}
+        raise HTTPException(status_code=400, detail=str(exc)) from exc

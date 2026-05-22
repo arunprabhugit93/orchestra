@@ -12,6 +12,12 @@ class LangfuseImportRequest(BaseModel):
     max_pages: int = 5
 
 
+class AgentNodeMappingRequest(BaseModel):
+    node_id: str
+    placement_type: str = "Primary"
+    status: str = "Active"
+
+
 class AgentOnboardRequest(BaseModel):
     display_name: str
     provider: str = "langfuse"
@@ -19,6 +25,8 @@ class AgentOnboardRequest(BaseModel):
     public_key: str
     secret_key: str
     metadata: dict = Field(default_factory=dict)
+    profile: dict = Field(default_factory=dict)
+    node_mappings: list[AgentNodeMappingRequest] = Field(default_factory=list)
 
 
 class AgentUpdateRequest(BaseModel):
@@ -28,6 +36,8 @@ class AgentUpdateRequest(BaseModel):
     public_key: str | None = None
     secret_key: str | None = None
     metadata: dict | None = None
+    profile: dict | None = None
+    node_mappings: list[AgentNodeMappingRequest] | None = None
 
 
 class NodeTypeRequest(BaseModel):

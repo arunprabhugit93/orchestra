@@ -46,8 +46,11 @@ function App() {
   const [filter, setFilter] = useState("");
   const [agentDialog, setAgentDialog] = useState({ open: false, mode: "create", agent: null });
   const [agentForm, setAgentForm] = useState(EMPTY_AGENT_FORM);
+  const [agentOrgNodes, setAgentOrgNodes] = useState([]);
   const [formError, setFormError] = useState("");
+  const [agentSubmitting, setAgentSubmitting] = useState(false);
   const [pageError, setPageError] = useState("");
+  const [graphSection, setGraphSection] = useState("overview");
 
   const selectedAgent = agents.find((agent) => agent.agent_id === selectedAgentId) || null;
   const selectedRun = runs.find((run) => run.run_id === selectedRunId && run.agent_id === selectedRunAgentId) || null;
@@ -136,16 +139,26 @@ function App() {
     setMode("settings");
   }
 
+  function openOrganizationGraph() {
+    setMode("organization_graph");
+  }
+
   async function importLangfuse() {
     if (!selectedAgentId) return;
-    setConnectionStatus("Importing");
-    await fetchJson(`/agents/${encodeURIComponent(selectedAgentId)}/import-langfuse`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ limit: 100, max_pages: 2 }),
-    });
-    await loadRuns(selectedAgentId, { keepTransactionsView: true });
-    setConnectionStatus("Live");
+    try {
+      setConnectionStatus("Importing");
+      const result = await fetchJson(`/agents/${encodeURIComponent(selectedAgentId)}/import-langfuse`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ limit: 100, max_pages: 2 }),
+      });
+      if (result?.error) throw new Error(result.error);
+      await loadRuns(selectedAgentId, { keepTransactionsView: true });
+      setConnectionStatus("Live");
+    } catch (error) {
+      setConnectionStatus("Import failed");
+      window.alert(`Langfuse import failed: ${error.message}`);
+    }
   }
 
   function backToAgents() {
@@ -158,21 +171,42 @@ function App() {
     setSelectedView("transactions");
   }
 
-  function openCreateDialog() {
+  async function loadAgentOrgNodes() {
+    try {
+      const hierarchy = await fetchJson("/settings/organization-nodes/hierarchy");
+      setAgentOrgNodes(flattenOrgNodes(hierarchy).filter((node) => node.status !== "Archived"));
+    } catch {
+      setAgentOrgNodes([]);
+    }
+  }
+
+  async function openCreateDialog() {
     setFormError("");
+    setAgentSubmitting(false);
     setAgentForm(EMPTY_AGENT_FORM);
+    await loadAgentOrgNodes();
     setAgentDialog({ open: true, mode: "create", agent: null });
   }
 
-  function openEditDialog(agent) {
+  async function openEditDialog(agent) {
     setFormError("");
+    setAgentSubmitting(false);
+    const profile = agent.profile || {};
+    const mappings = agent.node_mappings || [];
+    const primary = mappings.find((mapping) => mapping.placement_type === "Primary");
     setAgentForm({
+      ...EMPTY_AGENT_FORM,
       agent_id: agent.agent_id,
       display_name: agent.display_name,
       base_url: agent.base_url,
       public_key: "",
       secret_key: "",
+      ...profile,
+      primary_node_id: primary?.node_id || "",
+      supporting_node_ids: mappings.filter((mapping) => mapping.placement_type !== "Primary").map((mapping) => mapping.node_id),
+      placement_type: primary?.placement_type || "Primary",
     });
+    await loadAgentOrgNodes();
     setAgentDialog({ open: true, mode: "edit", agent });
   }
 
@@ -180,12 +214,34 @@ function App() {
     event.preventDefault();
     setFormError("");
     const editing = agentDialog.mode === "edit";
+    const draft = event.nativeEvent.submitter?.dataset.intent === "draft";
+    const requireGovernance = !draft && !editing;
     const displayName = agentForm.display_name.trim();
     const baseUrl = agentForm.base_url.trim();
     const publicKey = agentForm.public_key.trim();
     const secretKey = agentForm.secret_key.trim();
     if (!displayName) {
       setFormError("Display name is required.");
+      return;
+    }
+    if (requireGovernance && !agentForm.agent_type) {
+      setFormError("Agent Type is required.");
+      return;
+    }
+    if (requireGovernance && !agentForm.use_case_summary.trim()) {
+      setFormError("Use Case Summary is required.");
+      return;
+    }
+    if (requireGovernance && !agentForm.primary_node_id) {
+      setFormError("Primary Organization Node is required.");
+      return;
+    }
+    if (requireGovernance && (!agentForm.business_owner.trim() || !agentForm.technical_owner.trim())) {
+      setFormError("Business Owner and Technical Owner are required.");
+      return;
+    }
+    if (requireGovernance && (!agentForm.data_classification || !agentForm.access_scope)) {
+      setFormError("Data Classification and Access Scope are required.");
       return;
     }
     if (!baseUrl) {
@@ -196,26 +252,47 @@ function App() {
       setFormError("Public key and secret key are required when adding an agent.");
       return;
     }
+    setAgentSubmitting(true);
     const payload = {
       display_name: displayName,
       provider: "langfuse",
       base_url: baseUrl,
       metadata: editing ? agentDialog.agent?.metadata || {} : {},
+      profile: { ...buildAgentProfile(agentForm), onboarding_status: draft || (editing && !isGovernanceComplete(agentForm)) ? "Draft" : "Submitted" },
+      node_mappings: buildAgentNodeMappings(agentForm),
     };
     if (publicKey) payload.public_key = publicKey;
     if (secretKey) payload.secret_key = secretKey;
 
     try {
+      setConnectionStatus(editing ? "Saving agent" : "Adding agent");
       const saved = await fetchJson(editing ? `/agents/${encodeURIComponent(agentForm.agent_id)}` : "/agents", {
         method: editing ? "PUT" : "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
       setSelectedAgentId(saved.agent_id);
+      setAgents((current) => {
+        const remaining = current.filter((agent) => agent.agent_id !== saved.agent_id);
+        return [saved, ...remaining];
+      });
+      if (!editing) {
+        setMode("agents");
+        setRuns([]);
+        setEvents([]);
+        setSelectedRunId("");
+        setSelectedRunAgentId("");
+        setSelectedEventId("");
+        setSelectedView("transactions");
+      }
       setAgentDialog({ open: false, mode: "create", agent: null });
       await loadAgents();
+      setConnectionStatus("Live");
     } catch (error) {
       setFormError(error.message);
+      setConnectionStatus("Save failed");
+    } finally {
+      setAgentSubmitting(false);
     }
   }
 
@@ -241,9 +318,13 @@ function App() {
           </button>
         </header>
         <nav className="module-nav" aria-label="Modules">
-          <button className={`module-item ${mode !== "settings" ? "active" : ""}`} type="button" onClick={backToAgents}>
+          <button className={`module-item ${mode !== "settings" && mode !== "organization_graph" ? "active" : ""}`} type="button" onClick={backToAgents}>
             <span>Agents</span>
             <small>Onboard and monitor</small>
+          </button>
+          <button className={`module-item ${mode === "organization_graph" ? "active" : ""}`} type="button" onClick={openOrganizationGraph}>
+            <span>Organization Graph</span>
+            <small>AI operating model</small>
           </button>
           <button className={`module-item ${mode === "settings" ? "active" : ""}`} type="button" onClick={openSettings}>
             <span>Settings</span>
@@ -256,7 +337,7 @@ function App() {
         <section className="topbar">
           <div>
             <div className="eyebrow">Module</div>
-            <h2>{mode === "agent_detail" ? "Agent Detail" : mode === "settings" ? "Settings" : "Agents"}</h2>
+            <h2>{mode === "agent_detail" ? "Agent Detail" : mode === "settings" ? "Settings" : mode === "organization_graph" ? "Organization Graph" : "Agents"}</h2>
           </div>
           <div className="topbar-actions">
             {mode === "agent_detail" && (
@@ -277,7 +358,7 @@ function App() {
                 </button>
               </>
             )}
-            {mode !== "settings" && (
+            {mode !== "settings" && mode !== "organization_graph" && (
               <button className="command-button" type="button" onClick={openCreateDialog}>
                 <span aria-hidden="true">+</span>
                 Add Agent
@@ -289,6 +370,10 @@ function App() {
         {mode === "settings" ? (
           <ErrorBoundary label="Settings failed to render">
             <SettingsModule />
+          </ErrorBoundary>
+        ) : mode === "organization_graph" ? (
+          <ErrorBoundary label="Organization Graph failed to render">
+            <OrganizationGraphModule section={graphSection} onSection={setGraphSection} onOpenSettings={openSettings} onOpenAgent={openEditDialog} />
           </ErrorBoundary>
         ) : mode === "agents" ? (
           <AgentRegistry
@@ -328,6 +413,8 @@ function App() {
           mode={agentDialog.mode}
           form={agentForm}
           error={formError}
+          submitting={agentSubmitting}
+          orgNodes={agentOrgNodes}
           onChange={(patch) => setAgentForm((current) => ({ ...current, ...patch }))}
           onClose={() => setAgentDialog({ open: false, mode: "create", agent: null })}
           onSubmit={saveAgent}
@@ -431,18 +518,56 @@ function AgentRegistry({ agents, pageError, selectedAgentId, onView, onEdit, onD
   );
 }
 
-function AgentDialog({ mode, form, error, onChange, onClose, onSubmit }) {
+const AGENT_TYPES = ["Assistant", "Analytics", "Workflow Automation", "Decision Support", "Autonomous Action"];
+const INPUT_TYPES = ["Text", "Voice", "API", "File", "Event Trigger"];
+const OUTPUT_TYPES = ["Recommendation", "Notification", "System Update", "Report", "Action Trigger"];
+const DATA_CLASSIFICATIONS = ["Public", "Internal", "Confidential", "Restricted"];
+const ACCESS_SCOPES = ["Read Only", "Limited Write", "Full Transactional"];
+const CRITICALITIES = ["Low", "Medium", "High", "Critical"];
+const PROCESS_DEPENDENCIES = ["Optional", "Supporting", "Core", "Mission Critical"];
+const USER_IMPACTS = ["Internal Only", "Customer Facing", "Regulatory Facing"];
+const FAILURE_IMPACTS = ["Minor Inconvenience", "Operational Delay", "Financial Loss", "Compliance Breach"];
+const DOWNTIME_TOLERANCES = [">24 Hours", "8-24 Hours", "1-8 Hours", "<1 Hour"];
+const AUTONOMY_LEVELS = ["Suggestion Only", "Human Approval Required", "Semi Autonomous", "Fully Autonomous"];
+const DEPLOYMENT_ENVIRONMENTS = ["Development", "UAT", "Production"];
+const DEPLOYMENT_STATUSES = ["Draft", "Testing", "Ready", "Live", "Retired"];
+
+function AgentDialog({ mode, form, error, submitting, orgNodes, onChange, onClose, onSubmit }) {
   const editing = mode === "edit";
+  const [nodeQuery, setNodeQuery] = useState("");
+  const suggestedRisk = suggestAgentRisk(form);
+  const visibleNodes = useMemo(() => {
+    const query = nodeQuery.trim().toLowerCase();
+    if (!query) return orgNodes;
+    return orgNodes.filter((node) =>
+      [node.node_name, node.node_code, node.node_type, breadcrumbText(node)].filter(Boolean).join(" ").toLowerCase().includes(query),
+    );
+  }, [nodeQuery, orgNodes]);
+  const selectedPrimaryNode = orgNodes.find((node) => node.id === form.primary_node_id);
+  const supportingNodes = orgNodes.filter((node) => form.supporting_node_ids.includes(node.id));
+
+  function updateMultiValue(field, value, checked) {
+    const current = new Set(form[field] || []);
+    if (checked) current.add(value);
+    else current.delete(value);
+    onChange({ [field]: [...current] });
+  }
+
+  function updateSupportingNodes(event) {
+    const ids = [...event.target.selectedOptions].map((option) => option.value).filter((id) => id !== form.primary_node_id);
+    onChange({ supporting_node_ids: ids });
+  }
+
   return (
     <div className="modal-backdrop" role="presentation">
-      <div className="agent-dialog" role="dialog" aria-modal="true" aria-labelledby="agent-dialog-title">
-        <form onSubmit={onSubmit}>
+      <div className="agent-dialog onboarding-dialog" role="dialog" aria-modal="true" aria-labelledby="agent-dialog-title">
+        <form onSubmit={onSubmit} noValidate>
           <div className="dialog-header">
             <div>
               <h3 id="agent-dialog-title">{editing ? "Edit Agent" : "Add Agent"}</h3>
-              <p>{editing ? "Update display details or rotate credentials." : "Connect a Langfuse-backed agent for monitoring."}</p>
+              <p>{editing ? "Update governance, mappings, or credentials." : "Register an agent with business ownership, controls, and operating profile."}</p>
             </div>
-            <button className="icon-button" type="button" onClick={onClose} aria-label="Close dialog">
+            <button className="icon-button" type="button" onClick={onClose} aria-label="Close dialog" disabled={submitting}>
               x
             </button>
           </div>
@@ -454,66 +579,248 @@ function AgentDialog({ mode, form, error, onChange, onClose, onSubmit }) {
             </div>
           )}
 
-          <div className="dialog-grid single">
-            <label>
-              Display name
-              <input
-                value={form.display_name}
-                onChange={(event) => onChange({ display_name: event.target.value })}
-                placeholder="Claims Agent Production"
-                required
-              />
-            </label>
+          <div className="onboarding-risk-strip">
+            <div>
+              <span>Suggested Risk</span>
+              <strong className={`risk-chip ${suggestedRisk.toLowerCase()}`}>{suggestedRisk}</strong>
+            </div>
+            <div>
+              <span>Primary Mapping</span>
+              <strong>{selectedPrimaryNode ? breadcrumbText(selectedPrimaryNode) : "Required"}</strong>
+            </div>
+            <div>
+              <span>Readiness</span>
+              <strong>{form.deployment_environment} / {form.deployment_status}</strong>
+            </div>
           </div>
 
-          <label>
-            Langfuse base URL
-            <input
-              value={form.base_url}
-              onChange={(event) => onChange({ base_url: event.target.value })}
-              placeholder="https://hipaa.cloud.langfuse.com"
-              required
-            />
-          </label>
+          <details className="onboarding-section" open>
+            <summary>1. Basic Details</summary>
+            <div className="dialog-grid">
+              <label>Agent Name<input value={form.display_name} onChange={(event) => onChange({ display_name: event.target.value })} required /></label>
+              <label>Agent Code<input value={form.agent_code} onChange={(event) => onChange({ agent_code: event.target.value })} placeholder="TRN-AGT-001" /></label>
+              <label>Agent Type<SelectField value={form.agent_type} options={AGENT_TYPES} onChange={(value) => onChange({ agent_type: value })} required /></label>
+              <label>Lifecycle Status<SelectField value={form.lifecycle_status} options={DEPLOYMENT_STATUSES} onChange={(value) => onChange({ lifecycle_status: value })} /></label>
+            </div>
+            <label>Agent Description<textarea value={form.agent_description} onChange={(event) => onChange({ agent_description: event.target.value })} rows={2} /></label>
+            <label>Use Case Summary<textarea value={form.use_case_summary} onChange={(event) => onChange({ use_case_summary: event.target.value })} rows={2} required /></label>
+            <label>Business Objective<textarea value={form.business_objective} onChange={(event) => onChange({ business_objective: event.target.value })} rows={2} /></label>
+          </details>
 
-          <div className="dialog-grid">
-            <label>
-              Public key
-              <input
-                value={form.public_key}
-                onChange={(event) => onChange({ public_key: event.target.value })}
-                placeholder={editing ? "Leave blank to keep current key" : "pk-lf-..."}
-                required={!editing}
-              />
-            </label>
-            <label>
-              Secret key
-              <input
-                type="password"
-                value={form.secret_key}
-                onChange={(event) => onChange({ secret_key: event.target.value })}
-                placeholder={editing ? "Leave blank to keep current key" : "sk-lf-..."}
-                required={!editing}
-              />
-            </label>
-          </div>
+          <details className="onboarding-section" open>
+            <summary>2. Business Mapping</summary>
+            <input type="search" value={nodeQuery} onChange={(event) => setNodeQuery(event.target.value)} placeholder="Search hierarchy by node, code, owner, or type..." />
+            <div className="dialog-grid">
+              <label>Primary Organization Node<SelectField value={form.primary_node_id} options={visibleNodes.map(nodeOption)} onChange={(value) => onChange({ primary_node_id: value, supporting_node_ids: form.supporting_node_ids.filter((id) => id !== value) })} required /></label>
+              <label>Placement Type<SelectField value={form.placement_type} options={["Primary", "Supporting", "Shared"]} onChange={(value) => onChange({ placement_type: value })} /></label>
+            </div>
+            {selectedPrimaryNode && <div className="breadcrumb-preview">{breadcrumbText(selectedPrimaryNode)} <span>{selectedPrimaryNode.node_type}</span></div>}
+            <label>Supporting Nodes<select multiple value={form.supporting_node_ids} onChange={updateSupportingNodes}>{visibleNodes.filter((node) => node.id !== form.primary_node_id).map((node) => <option key={node.id} value={node.id}>{nodeOption(node).label}</option>)}</select></label>
+            {!!supportingNodes.length && <div className="selected-node-list">{supportingNodes.map((node) => <span key={node.id}>{breadcrumbText(node)} <small>{node.node_type}</small></span>)}</div>}
+            <div className="dialog-grid">
+              <label>Business Function<input value={form.business_function} onChange={(event) => onChange({ business_function: event.target.value })} /></label>
+              <label>Process Area<input value={form.process_area} onChange={(event) => onChange({ process_area: event.target.value })} /></label>
+              <label>Department Owner<input value={form.department_owner} onChange={(event) => onChange({ department_owner: event.target.value })} /></label>
+            </div>
+          </details>
+
+          <details className="onboarding-section">
+            <summary>3. Ownership</summary>
+            <div className="dialog-grid">
+              <label>Business Owner<input value={form.business_owner} onChange={(event) => onChange({ business_owner: event.target.value })} required /></label>
+              <label>Technical Owner<input value={form.technical_owner} onChange={(event) => onChange({ technical_owner: event.target.value })} required /></label>
+              <label>Operational Support Owner<input value={form.operational_support_owner} onChange={(event) => onChange({ operational_support_owner: event.target.value })} /></label>
+              <label>Escalation Contact<input value={form.escalation_contact} onChange={(event) => onChange({ escalation_contact: event.target.value })} /></label>
+              <label>Support Team<input value={form.support_team} onChange={(event) => onChange({ support_team: event.target.value })} /></label>
+            </div>
+          </details>
+
+          <details className="onboarding-section">
+            <summary>4. Capability & Function</summary>
+            <label>Agent Capability Type<SelectField value={form.capability_type} options={AGENT_TYPES} onChange={(value) => onChange({ capability_type: value })} /></label>
+            <CheckboxGroup title="Input Types" values={INPUT_TYPES} selected={form.input_types} onChange={(value, checked) => updateMultiValue("input_types", value, checked)} />
+            <CheckboxGroup title="Output Types" values={OUTPUT_TYPES} selected={form.output_types} onChange={(value, checked) => updateMultiValue("output_types", value, checked)} />
+            <label>Actions Performed<textarea value={form.actions_performed} onChange={(event) => onChange({ actions_performed: event.target.value })} rows={2} /></label>
+            <div className="dialog-grid">
+              <label>External Tools Used<input value={form.external_tools_used} onChange={(event) => onChange({ external_tools_used: event.target.value })} /></label>
+              <label>APIs Used<input value={form.apis_used} onChange={(event) => onChange({ apis_used: event.target.value })} /></label>
+              <label>Connected Systems<input value={form.connected_systems} onChange={(event) => onChange({ connected_systems: event.target.value })} /></label>
+            </div>
+          </details>
+
+          <details className="onboarding-section" open>
+            <summary>5. Data & Access</summary>
+            <div className="dialog-grid">
+              <label>Data Classification<SelectField value={form.data_classification} options={DATA_CLASSIFICATIONS} onChange={(value) => onChange({ data_classification: value })} required /></label>
+              <label>Access Scope<SelectField value={form.access_scope} options={ACCESS_SCOPES} onChange={(value) => onChange({ access_scope: value })} required /></label>
+            </div>
+            <label>Data Sources<input value={form.data_sources} onChange={(event) => onChange({ data_sources: event.target.value })} /></label>
+            <div className="toggle-row">
+              <label><input type="checkbox" checked={form.pii_usage} onChange={(event) => onChange({ pii_usage: event.target.checked })} /> PII Usage</label>
+              <label><input type="checkbox" checked={form.sensitive_data_usage} onChange={(event) => onChange({ sensitive_data_usage: event.target.checked })} /> Sensitive Data Usage</label>
+            </div>
+            <div className="dialog-grid">
+              <label>Read Access Systems<input value={form.read_access_systems} onChange={(event) => onChange({ read_access_systems: event.target.value })} /></label>
+              <label>Write Access Systems<input value={form.write_access_systems} onChange={(event) => onChange({ write_access_systems: event.target.value })} /></label>
+            </div>
+          </details>
+
+          <details className="onboarding-section" open>
+            <summary>6. Risk & Criticality</summary>
+            <div className="dialog-grid">
+              <label>Business Criticality<SelectField value={form.business_criticality} options={CRITICALITIES} onChange={(value) => onChange({ business_criticality: value })} /></label>
+              <label>Process Dependency<SelectField value={form.process_dependency} options={PROCESS_DEPENDENCIES} onChange={(value) => onChange({ process_dependency: value })} /></label>
+              <label>User Impact<SelectField value={form.user_impact} options={USER_IMPACTS} onChange={(value) => onChange({ user_impact: value })} /></label>
+              <label>Failure Impact<SelectField value={form.failure_impact} options={FAILURE_IMPACTS} onChange={(value) => onChange({ failure_impact: value })} /></label>
+              <label>Downtime Tolerance<SelectField value={form.downtime_tolerance} options={DOWNTIME_TOLERANCES} onChange={(value) => onChange({ downtime_tolerance: value })} /></label>
+              <label>Autonomy Level<SelectField value={form.autonomy_level} options={AUTONOMY_LEVELS} onChange={(value) => onChange({ autonomy_level: value })} /></label>
+              <label>Risk Level<SelectField value={form.risk_level} options={CRITICALITIES} onChange={(value) => onChange({ risk_level: value })} /></label>
+            </div>
+            <div className="dynamic-warning">System suggested criticality: <strong>{suggestedRisk}</strong></div>
+          </details>
+
+          <details className="onboarding-section">
+            <summary>7. Controls & Governance</summary>
+            <div className="toggle-row wrap">
+              {[
+                ["human_approval_required", "Human In The Loop Required"],
+                ["approval_required_before_execution", "Approval Required Before Execution"],
+                ["audit_logging_required", "Audit Logging Required"],
+                ["monitoring_required", "Monitoring Required"],
+                ["escalation_required", "Escalation Required"],
+                ["fallback_process_available", "Fallback Process Available"],
+              ].map(([field, label]) => <label key={field}><input type="checkbox" checked={!!form[field]} onChange={(event) => onChange({ [field]: event.target.checked })} /> {label}</label>)}
+            </div>
+            <div className="dialog-grid">
+              <label>Compliance Policy Reference<input value={form.compliance_policy_reference} onChange={(event) => onChange({ compliance_policy_reference: event.target.value })} /></label>
+              <label>Regulatory Impact<input value={form.regulatory_impact} onChange={(event) => onChange({ regulatory_impact: event.target.value })} /></label>
+              <label>Audit Requirement<input value={form.audit_requirement} onChange={(event) => onChange({ audit_requirement: event.target.value })} /></label>
+            </div>
+          </details>
+
+          <details className="onboarding-section">
+            <summary>8. Operational Readiness</summary>
+            <div className="dialog-grid">
+              <label>Deployment Environment<SelectField value={form.deployment_environment} options={DEPLOYMENT_ENVIRONMENTS} onChange={(value) => onChange({ deployment_environment: value })} /></label>
+              <label>Deployment Status<SelectField value={form.deployment_status} options={DEPLOYMENT_STATUSES} onChange={(value) => onChange({ deployment_status: value })} /></label>
+              <label>Monitoring SLA<input value={form.monitoring_sla} onChange={(event) => onChange({ monitoring_sla: event.target.value })} /></label>
+              <label>Support SLA<input value={form.support_sla} onChange={(event) => onChange({ support_sla: event.target.value })} /></label>
+              <label>Incident Severity Level<input value={form.incident_severity_level} onChange={(event) => onChange({ incident_severity_level: event.target.value })} /></label>
+              <label>Runtime Dependencies<input value={form.runtime_dependencies} onChange={(event) => onChange({ runtime_dependencies: event.target.value })} /></label>
+              <label>Linked Infrastructure<input value={form.linked_infrastructure} onChange={(event) => onChange({ linked_infrastructure: event.target.value })} /></label>
+              <label>Linked Models / LLMs<input value={form.linked_models} onChange={(event) => onChange({ linked_models: event.target.value })} /></label>
+            </div>
+          </details>
+
+          <details className="onboarding-section" open>
+            <summary>Langfuse Credentials</summary>
+            <label>Langfuse base URL<input value={form.base_url} onChange={(event) => onChange({ base_url: event.target.value })} required /></label>
+            <div className="dialog-grid">
+              <label>Public key<input value={form.public_key} onChange={(event) => onChange({ public_key: event.target.value })} placeholder={editing ? "Leave blank to keep current key" : "pk-lf-..."} required={!editing} /></label>
+              <label>Secret key<input type="password" value={form.secret_key} onChange={(event) => onChange({ secret_key: event.target.value })} placeholder={editing ? "Leave blank to keep current key" : "sk-lf-..."} required={!editing} /></label>
+            </div>
+          </details>
 
           <div className="form-error" role="alert">
             {error}
           </div>
 
           <div className="dialog-actions">
-            <button className="command-button" type="button" onClick={onClose}>
+            <button className="command-button" type="button" onClick={onClose} disabled={submitting}>
               Cancel
             </button>
-            <button className="command-button primary" type="submit">
-              {editing ? "Save Changes" : "Add Agent"}
+            <button className="command-button" type="submit" data-intent="draft" disabled={submitting} onClick={() => onChange({ lifecycle_status: "Draft", deployment_status: "Draft" })}>
+              Save Draft
+            </button>
+            <button className="command-button primary" type="submit" disabled={submitting}>
+              {submitting ? "Saving..." : editing ? "Save Changes" : "Add Agent"}
             </button>
           </div>
         </form>
       </div>
     </div>
   );
+}
+
+function SelectField({ value, options, onChange, required = false }) {
+  const normalized = options.map((option) => (typeof option === "string" ? { value: option, label: option } : option));
+  return (
+    <select value={value || ""} onChange={(event) => onChange(event.target.value)} required={required}>
+      <option value="">Select...</option>
+      {normalized.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+    </select>
+  );
+}
+
+function CheckboxGroup({ title, values, selected, onChange }) {
+  return (
+    <div className="checkbox-group">
+      <span>{title}</span>
+      <div>
+        {values.map((value) => (
+          <label key={value}>
+            <input type="checkbox" checked={(selected || []).includes(value)} onChange={(event) => onChange(value, event.target.checked)} />
+            {value}
+          </label>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function nodeOption(node) {
+  return { value: node.id, label: `${breadcrumbText(node)} (${node.node_type || node.nodeType})` };
+}
+
+function breadcrumbText(node) {
+  return (node.path || [{ node_name: node.node_name }]).map((part) => part.node_name).join(" > ");
+}
+
+function buildAgentNodeMappings(form) {
+  const mappings = [];
+  if (form.primary_node_id) mappings.push({ node_id: form.primary_node_id, placement_type: "Primary", status: "Active" });
+  for (const nodeId of form.supporting_node_ids || []) {
+    if (nodeId && nodeId !== form.primary_node_id) mappings.push({ node_id: nodeId, placement_type: form.placement_type === "Shared" ? "Shared" : "Supporting", status: "Active" });
+  }
+  return mappings;
+}
+
+function buildAgentProfile(form) {
+  const keys = Object.keys(EMPTY_AGENT_FORM).filter((key) => !["display_name", "base_url", "public_key", "secret_key", "primary_node_id", "supporting_node_ids", "placement_type"].includes(key));
+  const profile = {};
+  for (const key of keys) profile[key] = form[key];
+  profile.suggested_risk_level = suggestAgentRisk(form);
+  return profile;
+}
+
+function isGovernanceComplete(form) {
+  return Boolean(
+    form.agent_type &&
+      form.use_case_summary?.trim() &&
+      form.primary_node_id &&
+      form.business_owner?.trim() &&
+      form.technical_owner?.trim() &&
+      form.data_classification &&
+      form.access_scope,
+  );
+}
+
+function suggestAgentRisk(form) {
+  let score = 0;
+  if (form.autonomy_level === "Semi Autonomous") score += 2;
+  if (form.autonomy_level === "Fully Autonomous") score += 3;
+  if (form.data_classification === "Confidential") score += 2;
+  if (form.data_classification === "Restricted") score += 3;
+  if (form.access_scope === "Limited Write") score += 2;
+  if (form.access_scope === "Full Transactional") score += 3;
+  if (form.process_dependency === "Core") score += 2;
+  if (form.process_dependency === "Mission Critical") score += 3;
+  if (["Customer Facing", "Regulatory Facing"].includes(form.user_impact)) score += 2;
+  if (form.pii_usage || form.sensitive_data_usage) score += 1;
+  if (score >= 10) return "Critical";
+  if (score >= 7) return "High";
+  if (score >= 3) return "Medium";
+  return "Low";
 }
 
 function agentInitials(agent) {
@@ -524,6 +831,587 @@ function agentInitials(agent) {
     .slice(0, 2)
     .map((part) => part[0]?.toUpperCase())
     .join("");
+}
+
+const GRAPH_SECTIONS = [
+  ["overview", "Overview"],
+  ["canvas", "Graph Canvas"],
+  ["metrics", "Metrics View"],
+  ["relationships", "Agent Relationship View"],
+  ["explorer", "Node Detail Explorer"],
+];
+const GRAPH_KPIS = [
+  ["cost", "Cost"],
+  ["tokens", "Tokens"],
+  ["latency", "Latency"],
+  ["executions", "Executions"],
+  ["success_rate", "Success Rate"],
+  ["error_rate", "Error Rate"],
+  ["api_calls", "API Calls"],
+  ["runtime_duration", "Runtime Duration"],
+  ["active_users", "Active Users"],
+];
+const GRAPH_AGGREGATIONS = ["direct", "rollup", "combined"];
+const GRAPH_LAYOUTS = ["funnel roll-up", "vertical hierarchy", "horizontal hierarchy", "compact", "expanded", "grouped by business area", "grouped by node type"];
+
+function OrganizationGraphModule({ section, onSection, onOpenSettings, onOpenAgent }) {
+  const [graph, setGraph] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [kpi, setKpi] = useState("cost");
+  const [aggregation, setAggregation] = useState("combined");
+  const [layout, setLayout] = useState("funnel roll-up");
+  const [query, setQuery] = useState("");
+  const [filters, setFilters] = useState({ nodeType: "", deploymentStatus: "", riskLevel: "", activeState: "", hasMetrics: "" });
+  const [selectedId, setSelectedId] = useState("");
+  const [collapsed, setCollapsed] = useState(new Set());
+  const [showAgents, setShowAgents] = useState(true);
+  const [scale, setScale] = useState(1);
+
+  useEffect(() => {
+    loadGraph();
+  }, []);
+
+  async function loadGraph() {
+    try {
+      setLoading(true);
+      const data = await fetchJson("/organization-graph");
+      setGraph(data);
+      setError("");
+    } catch (loadError) {
+      setError(loadError.message);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  const graphModel = useMemo(() => {
+    if (!graph) return { nodes: [], edges: [], positioned: [], bounds: { width: 1200, height: 700 } };
+    const filtered = filterGraphData(graph, filters, query, collapsed, showAgents);
+    return layoutGraph(filtered.nodes, filtered.edges, layout);
+  }, [graph, filters, query, collapsed, showAgents, layout]);
+  const selected = graphModel.nodes.find((node) => node.id === selectedId) || null;
+  const overview = graph?.metrics?.overview || {};
+
+  function toggleCollapse(nodeId) {
+    setCollapsed((current) => {
+      const next = new Set(current);
+      if (next.has(nodeId)) next.delete(nodeId);
+      else next.add(nodeId);
+      return next;
+    });
+  }
+
+  function exportMetricsCsv() {
+    const rows = graphModel.nodes.map((node) => {
+      const metric = graphMetric(node, kpi, aggregation);
+      return [node.id, node.type, node.label, metric].map(csvCell).join(",");
+    });
+    downloadText("organization-graph-metrics.csv", ["id,type,label,metric", ...rows].join("\n"));
+  }
+
+  function exportSvg() {
+    const svg = document.querySelector(".org-graph-svg")?.outerHTML || "";
+    downloadText("organization-graph.svg", svg);
+  }
+
+  if (loading) return <div className="empty-state">Loading organization graph...</div>;
+  if (error) return <div className="empty-state">Could not load organization graph: {error}</div>;
+
+  return (
+    <section className="org-graph-module">
+      <div className="graph-subnav">
+        {GRAPH_SECTIONS.map(([id, label]) => (
+          <button key={id} className={`module-item ${section === id ? "active" : ""}`} type="button" onClick={() => onSection(id)}>
+            <span>{label}</span>
+          </button>
+        ))}
+      </div>
+
+      <GraphToolbar
+        kpi={kpi}
+        aggregation={aggregation}
+        layout={layout}
+        query={query}
+        filters={filters}
+        graph={graph}
+        showAgents={showAgents}
+        onKpi={setKpi}
+        onAggregation={setAggregation}
+        onLayout={setLayout}
+        onQuery={setQuery}
+        onFilters={setFilters}
+        onRefresh={loadGraph}
+        onReset={() => {
+          setQuery("");
+          setFilters({ nodeType: "", deploymentStatus: "", riskLevel: "", activeState: "", hasMetrics: "" });
+          setCollapsed(new Set());
+          setScale(1);
+        }}
+        onExportCsv={exportMetricsCsv}
+        onExportSvg={exportSvg}
+        onShowAgents={setShowAgents}
+      />
+
+      {section === "overview" && <GraphOverview overview={overview} graph={graph} kpi={kpi} />}
+      {section === "canvas" && (
+        <div className="graph-workbench">
+          <GraphCanvas
+            model={graphModel}
+            kpi={kpi}
+            aggregation={aggregation}
+            selectedId={selectedId}
+            selected={selected}
+            layout={layout}
+            scale={scale}
+            onScale={setScale}
+            onSelect={setSelectedId}
+            onToggleCollapse={toggleCollapse}
+            onOpenSettings={onOpenSettings}
+            onOpenAgent={onOpenAgent}
+          />
+        </div>
+      )}
+      {section === "metrics" && <GraphMetricsView model={graphModel} kpi={kpi} aggregation={aggregation} />}
+      {section === "relationships" && <AgentRelationshipView model={graphModel} />}
+      {section === "explorer" && <NodeDetailExplorer model={graphModel} selected={selected} onSelect={setSelectedId} graph={graph} />}
+    </section>
+  );
+}
+
+function GraphToolbar({ kpi, aggregation, layout, query, filters, graph, showAgents, onKpi, onAggregation, onLayout, onQuery, onFilters, onRefresh, onReset, onExportCsv, onExportSvg, onShowAgents }) {
+  return (
+    <div className="graph-toolbar">
+      <select value={kpi} onChange={(event) => onKpi(event.target.value)}>{GRAPH_KPIS.map(([id, label]) => <option key={id} value={id}>{label}</option>)}</select>
+      <select value={aggregation} onChange={(event) => onAggregation(event.target.value)}>{GRAPH_AGGREGATIONS.map((mode) => <option key={mode} value={mode}>{mode}</option>)}</select>
+      <select value={layout} onChange={(event) => onLayout(event.target.value)}>{GRAPH_LAYOUTS.map((mode) => <option key={mode} value={mode}>{mode}</option>)}</select>
+      <input type="search" value={query} onChange={(event) => onQuery(event.target.value)} placeholder="Search and focus node or agent..." />
+      <select value={filters.nodeType} onChange={(event) => onFilters({ ...filters, nodeType: event.target.value })}>
+        <option value="">All node types</option>
+        {(graph.filters?.nodeTypes || []).map((item) => <option key={item} value={item}>{item}</option>)}
+      </select>
+      <select value={filters.deploymentStatus} onChange={(event) => onFilters({ ...filters, deploymentStatus: event.target.value })}>
+        <option value="">All deployments</option>
+        {(graph.filters?.deploymentStatuses || []).map((item) => <option key={item} value={item}>{item}</option>)}
+      </select>
+      <select value={filters.riskLevel} onChange={(event) => onFilters({ ...filters, riskLevel: event.target.value })}>
+        <option value="">All risks</option>
+        {(graph.filters?.riskLevels || []).map((item) => <option key={item} value={item}>{item}</option>)}
+      </select>
+      <select value={filters.hasMetrics} onChange={(event) => onFilters({ ...filters, hasMetrics: event.target.value })}>
+        <option value="">Metrics any</option>
+        <option value="yes">Has metrics</option>
+        <option value="no">No metrics</option>
+      </select>
+      <label className="toolbar-toggle"><input type="checkbox" checked={showAgents} onChange={(event) => onShowAgents(event.target.checked)} /> Agents</label>
+      <button className="mini-button" type="button" onClick={onRefresh}>Refresh</button>
+      <button className="mini-button" type="button" onClick={onReset}>Reset</button>
+      <button className="mini-button" type="button" onClick={onExportSvg}>SVG</button>
+      <button className="mini-button" type="button" onClick={onExportCsv}>CSV</button>
+    </div>
+  );
+}
+
+function GraphOverview({ overview, graph }) {
+  const cards = [
+    ["Org Nodes", overview.totalOrganizationNodes || 0],
+    ["AI Agents", overview.totalAiAgents || 0],
+    ["Active Agents", overview.activeAgents || 0],
+    ["Critical Agents", overview.criticalAgents || 0],
+    ["High Risk", overview.highRiskAgents || 0],
+    ["Production", overview.productionAgents || 0],
+    ["Tokens", formatNumber(overview.totalTokenUsage || 0)],
+    ["Runtime Cost", formatCost(overview.totalRuntimeCost || 0)],
+    ["Avg Latency", formatDuration(overview.averageLatency || 0)],
+    ["Executions", overview.totalExecutions || 0],
+  ];
+  return (
+    <div className="graph-overview">
+      <div className="graph-summary-grid">{cards.map(([label, value]) => <div key={label} className="metric"><span>{label}</span><strong>{value}</strong></div>)}</div>
+      <div className="graph-chart-grid">
+        <MiniBarChart title="Cost by Business Area" rows={(overview.topConsumingDepartments || []).map((row) => ({ label: row.name, value: row.cost }))} valueFormat={formatCost} />
+        <MiniBarChart title="Top Consuming Agents" rows={(overview.topConsumingAgents || []).map((row) => ({ label: row.agentId, value: row.cost }))} valueFormat={formatCost} />
+        <MiniBarChart title="Risk Distribution" rows={objectRows(overview.riskDistribution)} />
+        <MiniBarChart title="Deployment Status" rows={objectRows(overview.deploymentStatusDistribution)} />
+        <MiniBarChart title="Agent Distribution by Department" rows={Object.entries(overview.mappedAgentsByNode || {}).map(([id, value]) => ({ label: graph.nodes.find((node) => node.entityId === id)?.label || id, value }))} />
+        <MiniBarChart title="Token Usage Trend" rows={(overview.topConsumingAgents || []).map((row) => ({ label: row.agentId, value: row.tokens }))} valueFormat={formatNumber} />
+      </div>
+    </div>
+  );
+}
+
+function MiniBarChart({ title, rows, valueFormat = formatNumber }) {
+  const max = Math.max(...rows.map((row) => Number(row.value) || 0), 1);
+  return (
+    <article className="graph-chart">
+      <h3>{title}</h3>
+      {!rows.length && <div className="empty-state">No data</div>}
+      {rows.map((row) => (
+        <div className="bar-row" key={row.label}>
+          <span>{row.label}</span>
+          <div><i style={{ width: `${Math.max(4, ((Number(row.value) || 0) / max) * 100)}%` }} /></div>
+          <strong>{valueFormat(row.value || 0)}</strong>
+        </div>
+      ))}
+    </article>
+  );
+}
+
+function GraphCanvas({ model, kpi, aggregation, selectedId, selected, layout, scale, onScale, onSelect, onToggleCollapse, onOpenSettings, onOpenAgent }) {
+  const selectedPosition = model.positioned.find((node) => node.id === selectedId);
+  const funnel = layout.includes("funnel");
+  const orgCount = model.nodes.filter((node) => node.type === "organization").length;
+  const agentCount = model.nodes.filter((node) => node.type === "agent").length;
+  return (
+    <div className="graph-canvas-frame">
+      <div className="graph-canvas-top">
+        <div>
+          <span>Operating Model Map</span>
+          <strong>{orgCount} org nodes / {agentCount} agents</strong>
+        </div>
+        <div className="graph-legend" aria-label="Graph legend">
+          <span><i className="legend-org" /> Organization</span>
+          <span><i className="legend-agent" /> Agent</span>
+          <span><i className="legend-risk" /> Higher risk</span>
+        </div>
+      </div>
+      <div className="graph-canvas-shell">
+        <div className="canvas-controls">
+          <button className="mini-button" type="button" onClick={() => onScale(Math.min(1.8, scale + 0.1))}>Zoom +</button>
+          <button className="mini-button" type="button" onClick={() => onScale(Math.max(0.45, scale - 0.1))}>Zoom -</button>
+          <button className="mini-button" type="button" onClick={() => onScale(1)}>Reset</button>
+        </div>
+        <svg
+          className="org-graph-svg"
+          viewBox={`0 0 ${model.bounds.width} ${model.bounds.height}`}
+          style={{ width: `${model.bounds.width * scale}px`, height: `${model.bounds.height * scale}px` }}
+        >
+          <defs>
+            <marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto"><path d="M0,0 L0,6 L7,3 z" /></marker>
+            <linearGradient id="orgNodeFill" x1="0" x2="1" y1="0" y2="1"><stop offset="0%" stopColor="#f8fbff" /><stop offset="100%" stopColor="#eef7ff" /></linearGradient>
+            <linearGradient id="agentNodeFill" x1="0" x2="1" y1="0" y2="1"><stop offset="0%" stopColor="#f5fffb" /><stop offset="100%" stopColor="#e9f8f4" /></linearGradient>
+            <linearGradient id="riskNodeFill" x1="0" x2="1" y1="0" y2="1"><stop offset="0%" stopColor="#fffaf0" /><stop offset="100%" stopColor="#fff1e6" /></linearGradient>
+          </defs>
+          {model.edges.map((edge) => {
+            const source = model.positioned.find((node) => node.id === edge.source);
+            const target = model.positioned.find((node) => node.id === edge.target);
+            if (!source || !target) return null;
+            const from = funnel ? target : source;
+            const to = funnel ? source : target;
+            const fromY = funnel ? from.y : from.y + 112;
+            const toY = funnel ? to.y + 112 : to.y;
+            return <path key={edge.id} className={`graph-edge ${edge.type} ${funnel ? "funnel" : ""}`} d={`M${from.x + 110},${fromY} C${from.x + 110},${(fromY + toY) / 2} ${to.x + 110},${(fromY + toY) / 2} ${to.x + 110},${toY}`} markerEnd="url(#arrow)" />;
+          })}
+          {model.positioned.map((node) => <GraphNode key={node.id} node={node} kpi={kpi} aggregation={aggregation} selected={node.id === selectedId} onSelect={onSelect} onToggleCollapse={onToggleCollapse} />)}
+        </svg>
+        {selected && selectedPosition && (
+          <GraphHoverPanel
+            selected={selected}
+            position={selectedPosition}
+            onClose={() => onSelect("")}
+            onOpenSettings={onOpenSettings}
+            onOpenAgent={onOpenAgent}
+          />
+        )}
+        <div className="graph-minimap">{model.positioned.slice(0, 90).map((node) => <span key={node.id} className={node.type} style={{ left: `${(node.x / model.bounds.width) * 100}%`, top: `${(node.y / model.bounds.height) * 100}%` }} />)}</div>
+      </div>
+    </div>
+  );
+}
+
+function GraphNode({ node, kpi, aggregation, selected, onSelect, onToggleCollapse }) {
+  const metric = graphMetric(node, kpi, aggregation);
+  const meta = node.metadata || {};
+  const risk = meta.suggested_risk_level || meta.risk_level || meta.business_criticality || "Low";
+  const isAgent = node.type === "agent";
+  const subtitle = isAgent ? `${meta.agent_type || "Agent"} / ${meta.deployment_status || "Draft"}` : `${meta.node_code || ""} / ${meta.node_type || ""}`;
+  const owner = isAgent ? meta.business_owner || `Risk ${risk}` : meta.owner || "No owner";
+  return (
+    <g
+      className={`graph-node ${node.type} ${selected ? "selected" : ""} ${risk.toLowerCase()}`}
+      transform={`translate(${node.x}, ${node.y})`}
+      onClick={() => onSelect(node.id)}
+      onMouseEnter={() => onSelect(node.id)}
+    >
+      <rect width="220" height="112" rx="8" />
+      <rect className="node-accent" width="220" height="8" rx="8" />
+      <circle className="node-dot" cx="18" cy="28" r="5" />
+      <text x="30" y="32" className="node-title">{truncateText(node.label, 25)}</text>
+      <text x="12" y="54" className="node-subtitle">{truncateText(subtitle, 34)}</text>
+      <text x="12" y="73">{truncateText(owner, 34)}</text>
+      <rect className="node-kpi-pill" x="12" y="84" width="116" height="20" rx="10" />
+      <text x="22" y="98" className="node-kpi">{kpiLabel(kpi)}: {formatGraphMetric(kpi, metric)}</text>
+      <text x="140" y="98" className="node-foot">{isAgent ? risk : `Agents ${meta.totalMappedAgents || 0}`}</text>
+      {node.type === "organization" && <text className="collapse-hit" x="196" y="24" onClick={(event) => { event.stopPropagation(); onToggleCollapse(node.id); }}>+/-</text>}
+    </g>
+  );
+}
+
+function GraphHoverPanel({ selected, position, onClose, onOpenSettings, onOpenAgent }) {
+  const meta = selected.metadata || {};
+  const metric = selected.type === "organization" ? meta.metrics?.combined || {} : meta.metrics || {};
+  const left = Math.min(position.x + 232, 920);
+  const top = Math.max(12, position.y - 8);
+  return (
+    <div className="graph-hover-panel" style={{ left, top }}>
+      <button className="mini-button" type="button" onClick={onClose}>x</button>
+      <span className={`provider-pill ${selected.type}`}>{selected.type}</span>
+      <h3>{selected.label}</h3>
+      <p>{selected.type === "organization" ? `${meta.node_code || ""} - ${meta.node_type || ""}` : `${meta.agent_type || "Agent"} - ${meta.deployment_status || "Draft"}`}</p>
+      <dl className="agent-card-details">
+        <div><dt>Owner</dt><dd>{meta.owner || meta.business_owner || "Not assigned"}</dd></div>
+        <div><dt>Cost</dt><dd>{formatCost(metric.cost || 0)}</dd></div>
+        <div><dt>Tokens</dt><dd>{formatNumber(metric.tokens || 0)}</dd></div>
+        <div><dt>Executions</dt><dd>{metric.executions || 0}</dd></div>
+        <div><dt>Success</dt><dd>{formatPercent(metric.success_rate || 0)}</dd></div>
+      </dl>
+      <div className="hover-actions">
+        {selected.type === "organization" ? (
+          <button className="mini-button" type="button" onClick={onOpenSettings}>Settings</button>
+        ) : (
+          <button className="mini-button" type="button" onClick={() => onOpenAgent({ agent_id: selected.entityId, ...meta })}>Onboarding</button>
+        )}
+        <button className="mini-button" type="button" onClick={() => downloadText(`${selected.entityId}-metrics.csv`, `metric,value\ncost,${metric.cost || 0}\ntokens,${metric.tokens || 0}\nexecutions,${metric.executions || 0}`)}>Export</button>
+      </div>
+    </div>
+  );
+}
+
+function GraphDetailPanel({ selected, graph, onOpenSettings, onOpenAgent }) {
+  if (!selected) return <aside className="graph-detail-panel"><h3>Detail Explorer</h3><p>Select an organization node or agent.</p></aside>;
+  const meta = selected.metadata || {};
+  const metric = selected.type === "organization" ? meta.metrics?.combined || {} : meta.metrics || {};
+  return (
+    <aside className="graph-detail-panel">
+      <h3>{selected.label}</h3>
+      <span className={`provider-pill ${selected.type}`}>{selected.type}</span>
+      <dl className="agent-card-details">
+        <div><dt>ID</dt><dd>{selected.entityId}</dd></div>
+        <div><dt>Status</dt><dd>{meta.status || meta.deployment_status || "Draft"}</dd></div>
+        <div><dt>Owner</dt><dd>{meta.owner || meta.business_owner || "Not assigned"}</dd></div>
+        <div><dt>Cost</dt><dd>{formatCost(metric.cost || 0)}</dd></div>
+        <div><dt>Tokens</dt><dd>{formatNumber(metric.tokens || 0)}</dd></div>
+        <div><dt>Executions</dt><dd>{metric.executions || 0}</dd></div>
+      </dl>
+      {selected.type === "organization" ? (
+        <button className="command-button" type="button" onClick={onOpenSettings}>Navigate to Settings</button>
+      ) : (
+        <button className="command-button" type="button" onClick={() => onOpenAgent({ agent_id: selected.entityId, ...meta })}>Navigate to Onboarding</button>
+      )}
+      <button className="command-button" type="button" onClick={() => downloadText(`${selected.entityId}-metrics.csv`, `metric,value\ncost,${metric.cost || 0}\ntokens,${metric.tokens || 0}\nexecutions,${metric.executions || 0}`)}>Export Subtree Metrics</button>
+    </aside>
+  );
+}
+
+function GraphMetricsView({ model, kpi, aggregation }) {
+  return (
+    <div className="graph-table-wrap">
+      <table className="run-table">
+        <thead><tr><th>Entity</th><th>Type</th><th>{kpiLabel(kpi)}</th><th>Cost</th><th>Tokens</th><th>Executions</th><th>Success</th></tr></thead>
+        <tbody>{model.nodes.map((node) => {
+          const metric = node.type === "organization" ? node.metadata.metrics?.[aggregation] || {} : node.metadata.metrics || {};
+          return <tr key={node.id}><td>{node.label}</td><td>{node.type}</td><td>{formatGraphMetric(kpi, graphMetric(node, kpi, aggregation))}</td><td>{formatCost(metric.cost || 0)}</td><td>{formatNumber(metric.tokens || 0)}</td><td>{metric.executions || 0}</td><td>{formatPercent(metric.success_rate || 0)}</td></tr>;
+        })}</tbody>
+      </table>
+    </div>
+  );
+}
+
+function AgentRelationshipView({ model }) {
+  const agents = model.nodes.filter((node) => node.type === "agent");
+  return <div className="relationship-grid">{agents.map((node) => <article key={node.id} className="agent-card"><h4>{node.label}</h4><p>{node.metadata.business_owner || "No business owner"} / {node.metadata.technical_owner || "No technical owner"}</p><dl className="agent-card-details"><div><dt>Systems</dt><dd>{node.metadata.connected_systems || "Not mapped"}</dd></div><div><dt>Models</dt><dd>{node.metadata.linked_models || node.metadata.provider || "Not mapped"}</dd></div><div><dt>Risk</dt><dd>{node.metadata.suggested_risk_level || node.metadata.risk_level || "Low"}</dd></div></dl></article>)}</div>;
+}
+
+function NodeDetailExplorer({ model, selected, onSelect, graph }) {
+  return (
+    <div className="explorer-grid">
+      <div className="graph-table-wrap">
+        <table className="run-table"><thead><tr><th>Node</th><th>Type</th><th>Status</th><th>Agents</th></tr></thead><tbody>{model.nodes.filter((node) => node.type === "organization").map((node) => <tr key={node.id} onClick={() => onSelect(node.id)}><td>{node.label}</td><td>{node.metadata.node_type}</td><td>{node.metadata.status}</td><td>{node.metadata.totalMappedAgents}</td></tr>)}</tbody></table>
+      </div>
+      <GraphDetailPanel selected={selected} graph={graph} onOpenSettings={() => {}} onOpenAgent={() => {}} />
+    </div>
+  );
+}
+
+function filterGraphData(graph, filters, query, collapsed, showAgents) {
+  const queryText = query.trim().toLowerCase();
+  const visible = new Set();
+  const orgNodes = graph.nodes.filter((node) => node.type === "organization");
+  const childEdges = graph.edges.filter((edge) => edge.type === "hierarchy");
+  const childrenBySource = childEdges.reduce((map, edge) => {
+    if (!map.has(edge.source)) map.set(edge.source, []);
+    map.get(edge.source).push(edge.target);
+    return map;
+  }, new Map());
+  function includeOrg(id, hiddenByParent = false) {
+    if (hiddenByParent) return;
+    visible.add(id);
+    const nextHidden = collapsed.has(id);
+    for (const child of childrenBySource.get(id) || []) includeOrg(child, nextHidden);
+  }
+  for (const node of orgNodes.filter((node) => !graph.edges.some((edge) => edge.type === "hierarchy" && edge.target === node.id))) includeOrg(node.id);
+  let nodes = graph.nodes.filter((node) => visible.has(node.id) || (showAgents && node.type === "agent" && visible.has(graph.edges.find((edge) => edge.target === node.id)?.source)));
+  nodes = nodes.filter((node) => {
+    const meta = node.metadata || {};
+    if (filters.nodeType && node.type === "organization" && meta.node_type !== filters.nodeType) return false;
+    if (filters.deploymentStatus && node.type === "agent" && (meta.deployment_status || "Draft") !== filters.deploymentStatus) return false;
+    if (filters.riskLevel && node.type === "agent" && ![meta.suggested_risk_level, meta.risk_level, meta.business_criticality].includes(filters.riskLevel)) return false;
+    if (filters.hasMetrics) {
+      const metric = node.type === "organization" ? meta.metrics?.combined : meta.metrics;
+      const has = Boolean(metric?.executions);
+      if (filters.hasMetrics === "yes" && !has) return false;
+      if (filters.hasMetrics === "no" && has) return false;
+    }
+    if (queryText && ![node.label, meta.node_code, meta.node_type, meta.owner, meta.agent_type, meta.business_owner].filter(Boolean).join(" ").toLowerCase().includes(queryText)) return false;
+    return true;
+  });
+  const nodeIds = new Set(nodes.map((node) => node.id));
+  return { nodes, edges: graph.edges.filter((edge) => nodeIds.has(edge.source) && nodeIds.has(edge.target)) };
+}
+
+function layoutGraph(nodes, edges, layout) {
+  if (layout.includes("funnel")) return layoutFunnelGraph(nodes, edges);
+  const byId = new Map(nodes.map((node) => [node.id, { ...node }]));
+  const incoming = new Map();
+  const children = new Map();
+  for (const edge of edges) {
+    incoming.set(edge.target, (incoming.get(edge.target) || 0) + 1);
+    if (!children.has(edge.source)) children.set(edge.source, []);
+    children.get(edge.source).push(edge.target);
+  }
+  const roots = nodes.filter((node) => !incoming.has(node.id)).map((node) => node.id);
+  const levels = new Map();
+  const queue = roots.map((id) => [id, 0]);
+  while (queue.length) {
+    const [id, level] = queue.shift();
+    if (levels.has(id) && levels.get(id) <= level) continue;
+    levels.set(id, level);
+    for (const child of children.get(id) || []) queue.push([child, level + 1]);
+  }
+  const grouped = new Map();
+  for (const node of nodes) {
+    const level = layout.includes("grouped by node type") ? String(node.metadata?.node_type || node.type) : String(levels.get(node.id) || 0);
+    if (!grouped.has(level)) grouped.set(level, []);
+    grouped.get(level).push(node.id);
+  }
+  const horizontal = layout.includes("horizontal");
+  const compact = layout.includes("compact");
+  const xGap = compact ? 250 : 300;
+  const yGap = compact ? 150 : 190;
+  const positioned = [];
+  [...grouped.entries()].forEach(([level, ids], levelIndex) => {
+    ids.forEach((id, index) => {
+      const node = byId.get(id);
+      const depth = Number.isNaN(Number(level)) ? levelIndex : Number(level);
+      node.x = horizontal ? index * xGap + 40 : depth * xGap + 40;
+      node.y = horizontal ? depth * yGap + 40 : index * yGap + 40;
+      positioned.push(node);
+    });
+  });
+  return { nodes, edges, positioned, bounds: { width: Math.max(1200, ...positioned.map((node) => node.x + 300)), height: Math.max(720, ...positioned.map((node) => node.y + 180)) } };
+}
+
+function layoutFunnelGraph(nodes, edges) {
+  const byId = new Map(nodes.map((node) => [node.id, { ...node }]));
+  const incoming = new Map();
+  const children = new Map();
+  for (const edge of edges) {
+    incoming.set(edge.target, (incoming.get(edge.target) || 0) + 1);
+    if (!children.has(edge.source)) children.set(edge.source, []);
+    children.get(edge.source).push(edge.target);
+  }
+  for (const childIds of children.values()) {
+    childIds.sort((left, right) => {
+      const leftNode = byId.get(left);
+      const rightNode = byId.get(right);
+      if (leftNode?.type !== rightNode?.type) return leftNode?.type === "organization" ? -1 : 1;
+      return String(leftNode?.label || "").localeCompare(String(rightNode?.label || ""));
+    });
+  }
+  const roots = nodes.filter((node) => !incoming.has(node.id)).map((node) => node.id);
+  let leafCursor = 0;
+  const positioned = [];
+  const visited = new Set();
+
+  function place(id, depth) {
+    const node = byId.get(id);
+    if (!node || visited.has(id)) return 0;
+    visited.add(id);
+    const childIds = children.get(id) || [];
+    if (!childIds.length) {
+      node.x = leafCursor * 270 + 60;
+      leafCursor += 1;
+    } else {
+      const childXs = childIds.map((childId) => place(childId, depth + 1)).filter((x) => Number.isFinite(x));
+      node.x = childXs.length ? childXs.reduce((sum, x) => sum + x, 0) / childXs.length : leafCursor * 270 + 60;
+    }
+    node.y = depth * 180 + 40;
+    positioned.push(node);
+    return node.x;
+  }
+
+  roots.forEach((rootId) => place(rootId, 0));
+  nodes.forEach((node) => {
+    if (!visited.has(node.id)) place(node.id, 0);
+  });
+  const minX = Math.min(0, ...positioned.map((node) => node.x));
+  if (minX < 40) positioned.forEach((node) => (node.x += 40 - minX));
+  return {
+    nodes,
+    edges,
+    positioned,
+    bounds: {
+      width: Math.max(1200, ...positioned.map((node) => node.x + 300)),
+      height: Math.max(720, ...positioned.map((node) => node.y + 180)),
+    },
+  };
+}
+
+function graphMetric(node, kpi, aggregation) {
+  const metrics = node.type === "organization" ? node.metadata?.metrics?.[aggregation] || {} : node.metadata?.metrics || {};
+  return metrics[kpi] || 0;
+}
+
+function kpiLabel(kpi) {
+  return GRAPH_KPIS.find(([id]) => id === kpi)?.[1] || kpi;
+}
+
+function formatGraphMetric(kpi, value) {
+  if (kpi === "cost") return formatCost(value);
+  if (kpi.includes("rate")) return formatPercent(value);
+  if (kpi.includes("latency") || kpi.includes("duration")) return formatDuration(value);
+  return formatNumber(value);
+}
+
+function truncateText(value, maxLength) {
+  const text = String(value || "");
+  return text.length > maxLength ? `${text.slice(0, Math.max(0, maxLength - 1))}…` : text;
+}
+
+function formatNumber(value) {
+  return Number(value || 0).toLocaleString();
+}
+
+function formatPercent(value) {
+  return `${Number(value || 0).toFixed(1)}%`;
+}
+
+function objectRows(object = {}) {
+  return Object.entries(object).map(([label, value]) => ({ label, value }));
+}
+
+function csvCell(value) {
+  return `"${String(value ?? "").replaceAll('"', '""')}"`;
+}
+
+function downloadText(filename, content) {
+  const blob = new Blob([content], { type: "text/plain;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  link.click();
+  URL.revokeObjectURL(url);
 }
 
 const EMPTY_ORG_NODE_FORM = {
