@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { fetchJson } from "./api/client";
+import { clearAuth, fetchJson, getStoredAuth, storeAuth } from "./api/client";
 import { DATA_VIEWS, EMPTY_AGENT_FORM, EVENT_LABELS, TRACE_FILTERS } from "./domain/constants";
 import { formatCost, formatDate, formatDuration, formatPayloadValue, shortId } from "./utils/formatters";
 import { WS_URL } from "./config";
@@ -33,6 +33,8 @@ class ErrorBoundary extends React.Component {
 }
 
 function App() {
+  const [auth, setAuth] = useState(() => getStoredAuth());
+  const [authChecking, setAuthChecking] = useState(Boolean(getStoredAuth()?.token));
   const [connectionStatus, setConnectionStatus] = useState("Connecting");
   const [mode, setMode] = useState("agents");
   const [agents, setAgents] = useState([]);
@@ -63,10 +65,41 @@ function App() {
   );
 
   useEffect(() => {
-    loadAgents();
+    function handleExpired() {
+      setAuth(null);
+      setConnectionStatus("Login required");
+    }
+    window.addEventListener("agent-monitor-auth-expired", handleExpired);
+    return () => window.removeEventListener("agent-monitor-auth-expired", handleExpired);
   }, []);
 
   useEffect(() => {
+    if (!auth?.token) return;
+    let active = true;
+    setAuthChecking(true);
+    fetchJson("/auth/me")
+      .then((session) => {
+        if (!active) return;
+        const nextAuth = { ...auth, email: session.email, expires_at: session.expires_at };
+        storeAuth(nextAuth);
+        setAuth(nextAuth);
+        setConnectionStatus("Connecting");
+        return loadAgents();
+      })
+      .catch(() => {
+        if (!active) return;
+        handleLogout();
+      })
+      .finally(() => {
+        if (active) setAuthChecking(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [auth?.token]);
+
+  useEffect(() => {
+    if (!auth?.token) return;
     const socket = new WebSocket(WS_URL);
     socket.addEventListener("open", () => setConnectionStatus("Live"));
     socket.addEventListener("error", () => setConnectionStatus("Offline"));
@@ -79,7 +112,22 @@ function App() {
       }
     });
     return () => socket.close();
-  }, [selectedRunId, selectedRunAgentId]);
+  }, [auth?.token, selectedRunId, selectedRunAgentId]);
+
+  function handleLogin(nextAuth) {
+    storeAuth(nextAuth);
+    setAuth(nextAuth);
+  }
+
+  function handleLogout() {
+    clearAuth();
+    setAuth(null);
+    setAgents([]);
+    setRuns([]);
+    setEvents([]);
+    setSelectedAgentId("");
+    setConnectionStatus("Login required");
+  }
 
   async function loadAgents() {
     try {
@@ -305,13 +353,29 @@ function App() {
 
   const metrics = selectedRunMetrics(selectedRun, events, costBreakdown);
 
+  if (!auth?.token) {
+    return <LoginScreen onLogin={handleLogin} />;
+  }
+
+  if (authChecking) {
+    return (
+      <div className="auth-shell">
+        <div className="auth-card compact">
+          <span className="eyebrow">Security</span>
+          <h1>Checking session</h1>
+          <p>Validating your login before loading the workspace.</p>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="app-shell">
       <aside className="sidebar">
         <header className="sidebar-header">
           <div>
             <h1>Agent Monitor</h1>
-            <p>{connectionStatus}</p>
+            <p>{connectionStatus} - {auth.email}</p>
           </div>
           <button className="icon-button" type="button" onClick={refreshCurrentView} title="Refresh" aria-label="Refresh">
             R
@@ -364,6 +428,9 @@ function App() {
                 Add Agent
               </button>
             )}
+            <button className="command-button" type="button" onClick={handleLogout}>
+              Logout
+            </button>
           </div>
         </section>
 
@@ -421,6 +488,125 @@ function App() {
         />
       )}
     </div>
+  );
+}
+
+function LoginScreen({ onLogin }) {
+  const [email, setEmail] = useState("");
+  const [otp, setOtp] = useState("");
+  const [step, setStep] = useState("email");
+  const [devOtp, setDevOtp] = useState("");
+  const [delivery, setDelivery] = useState("");
+  const [error, setError] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+
+  async function requestOtp(event) {
+    event.preventDefault();
+    setError("");
+    setSubmitting(true);
+    try {
+      const result = await fetchJson("/auth/request-otp", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email }),
+      });
+      setDevOtp(result.dev_otp || "");
+      setDelivery(result.delivery || "email");
+      setStep("otp");
+    } catch (requestError) {
+      setError(requestError.message);
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  async function verifyOtp(event) {
+    event.preventDefault();
+    setError("");
+    setSubmitting(true);
+    try {
+      const result = await fetchJson("/auth/verify-otp", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email, otp }),
+      });
+      onLogin(result);
+    } catch (verifyError) {
+      setError(verifyError.message);
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <main className="auth-shell">
+      <section className="auth-card">
+        <div className="auth-brand">
+          <span className="eyebrow">Secure Access</span>
+          <h1>Agent Monitor</h1>
+          <p>Sign in with your work email and one-time passcode.</p>
+        </div>
+
+        {step === "email" ? (
+          <form className="auth-form" onSubmit={requestOtp}>
+            <label>
+              Email address
+              <input
+                type="email"
+                value={email}
+                onChange={(event) => setEmail(event.target.value)}
+                placeholder="name@company.com"
+                autoComplete="email"
+                required
+              />
+            </label>
+            {error && <div className="auth-error">{error}</div>}
+            <button className="command-button primary" type="submit" disabled={submitting}>
+              {submitting ? "Sending..." : "Send OTP"}
+            </button>
+          </form>
+        ) : (
+          <form className="auth-form" onSubmit={verifyOtp}>
+            <label>
+              One-time passcode
+              <input
+                type="text"
+                value={otp}
+                onChange={(event) => setOtp(event.target.value.replace(/\D/g, "").slice(0, 6))}
+                placeholder="000000"
+                inputMode="numeric"
+                autoComplete="one-time-code"
+                required
+              />
+            </label>
+            {delivery === "email" && <div className="otp-preview">OTP sent to {email.trim()}.</div>}
+            {devOtp && (
+              <div className="otp-preview">
+                Email delivery is not configured. Use local development OTP: <strong>{devOtp}</strong>
+              </div>
+            )}
+            {error && <div className="auth-error">{error}</div>}
+            <div className="auth-actions">
+              <button className="command-button primary" type="submit" disabled={submitting || otp.length !== 6}>
+                {submitting ? "Verifying..." : "Verify and login"}
+              </button>
+              <button
+                className="command-button"
+                type="button"
+                onClick={() => {
+                  setStep("email");
+                  setOtp("");
+                  setDevOtp("");
+                  setDelivery("");
+                }}
+              >
+                Change email
+              </button>
+            </div>
+          </form>
+        )}
+      </section>
+    </main>
   );
 }
 

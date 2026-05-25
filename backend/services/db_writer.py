@@ -148,6 +148,28 @@ CREATE TABLE IF NOT EXISTS org_audit_history (
 );
 
 CREATE INDEX IF NOT EXISTS idx_org_audit_entity ON org_audit_history(entity_type, entity_id);
+
+CREATE TABLE IF NOT EXISTS login_otp (
+    id TEXT PRIMARY KEY,
+    email TEXT NOT NULL,
+    otp_hash TEXT NOT NULL,
+    expires_at TIMESTAMPTZ NOT NULL,
+    consumed_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_login_otp_email ON login_otp(email);
+CREATE INDEX IF NOT EXISTS idx_login_otp_expires ON login_otp(expires_at);
+
+CREATE TABLE IF NOT EXISTS login_session (
+    token_hash TEXT PRIMARY KEY,
+    email TEXT NOT NULL,
+    expires_at TIMESTAMPTZ NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_login_session_email ON login_session(email);
+CREATE INDEX IF NOT EXISTS idx_login_session_expires ON login_session(expires_at);
 """
 
 

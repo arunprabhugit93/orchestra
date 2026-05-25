@@ -12,6 +12,15 @@ class LangfuseImportRequest(BaseModel):
     max_pages: int = 5
 
 
+class OtpRequest(BaseModel):
+    email: str
+
+
+class OtpVerifyRequest(BaseModel):
+    email: str
+    otp: str
+
+
 class AgentNodeMappingRequest(BaseModel):
     node_id: str
     placement_type: str = "Primary"

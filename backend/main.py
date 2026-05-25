@@ -1,14 +1,15 @@
 import asyncio
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
-from api.routes import agents, alerts, health, imports, organization_graph, runs, settings as settings_routes
+from api.routes import agents, alerts, auth, health, imports, organization_graph, runs, settings as settings_routes
 from services.anomaly_detector import analyse_event
 from services.db_writer import close_db, init_db, write_event
 from services.event_bus import subscribe_events
 from services.settings import get_settings
+from services.auth import require_session
 
 
 connected_clients: set[WebSocket] = set()
@@ -56,12 +57,14 @@ def create_app() -> FastAPI:
     )
 
     app.include_router(health.router)
-    app.include_router(agents.router)
-    app.include_router(runs.router)
-    app.include_router(alerts.router)
-    app.include_router(imports.router)
-    app.include_router(organization_graph.router)
-    app.include_router(settings_routes.router)
+    app.include_router(auth.router)
+    protected = [Depends(require_session)]
+    app.include_router(agents.router, dependencies=protected)
+    app.include_router(runs.router, dependencies=protected)
+    app.include_router(alerts.router, dependencies=protected)
+    app.include_router(imports.router, dependencies=protected)
+    app.include_router(organization_graph.router, dependencies=protected)
+    app.include_router(settings_routes.router, dependencies=protected)
 
     @app.websocket("/ws/events")
     async def websocket_endpoint(websocket: WebSocket):
