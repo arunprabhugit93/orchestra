@@ -57,6 +57,11 @@ function proxyHttp(req, res) {
 
 const server = createServer((req, res) => {
   const pathname = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`).pathname;
+  if (pathname === "/favicon.ico") {
+    res.writeHead(204, { "cache-control": "public, max-age=86400" });
+    res.end();
+    return;
+  }
   if (pathname.startsWith("/assets/") || pathname === "/" || pathname.endsWith(".html")) {
     serveStatic(req, res).catch((error) => {
       res.writeHead(500, { "content-type": "application/json" });

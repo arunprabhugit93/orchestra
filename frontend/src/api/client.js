@@ -25,7 +25,18 @@ export async function fetchJson(path, options = {}) {
   if (auth?.token && !headers.has("Authorization")) {
     headers.set("Authorization", `Bearer ${auth.token}`);
   }
+  const started = performance.now();
   const response = await fetch(url, { ...options, headers });
+  if (!path.startsWith("/audit/")) {
+    auditClientEvent({
+      eventType: "frontend_api_call",
+      status: response.ok ? "success" : "error",
+      module: "frontend/api",
+      function: `${options.method || "GET"} ${path}`,
+      message: response.ok ? "API call completed" : "API call failed",
+      metadata: { path, statusCode: response.status, durationMs: Math.round(performance.now() - started) },
+    });
+  }
   if (response.status === 401) {
     clearAuth();
     window.dispatchEvent(new CustomEvent("agent-monitor-auth-expired"));
@@ -42,4 +53,18 @@ export async function fetchJson(path, options = {}) {
     throw new Error(message);
   }
   return response.json();
+}
+
+export function auditClientEvent(event) {
+  const auth = getStoredAuth();
+  if (!auth?.token) return;
+  fetch(`${API_BASE}/audit/events`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${auth.token}`,
+    },
+    body: JSON.stringify(event),
+    keepalive: true,
+  }).catch(() => {});
 }

@@ -202,6 +202,23 @@ CREATE TABLE IF NOT EXISTS ai_intake_request (
 CREATE INDEX IF NOT EXISTS idx_ai_intake_tenant_status ON ai_intake_request(tenant_id, status);
 CREATE INDEX IF NOT EXISTS idx_ai_intake_department ON ai_intake_request(tenant_id, department);
 CREATE INDEX IF NOT EXISTS idx_ai_intake_created ON ai_intake_request(created_at DESC);
+
+CREATE TABLE IF NOT EXISTS audit_event (
+    id TEXT PRIMARY KEY,
+    timestamp TIMESTAMPTZ NOT NULL,
+    event_type TEXT NOT NULL,
+    status TEXT NOT NULL,
+    module TEXT NOT NULL,
+    function_name TEXT,
+    message TEXT,
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb
+);
+
+CREATE INDEX IF NOT EXISTS idx_audit_event_timestamp ON audit_event(timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_audit_event_status ON audit_event(status);
+CREATE INDEX IF NOT EXISTS idx_audit_event_module ON audit_event(module);
+CREATE INDEX IF NOT EXISTS idx_audit_event_type ON audit_event(event_type);
+CREATE INDEX IF NOT EXISTS idx_audit_event_function ON audit_event(function_name);
 """
 
 

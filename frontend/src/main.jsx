@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { clearAuth, fetchJson, getStoredAuth, storeAuth } from "./api/client";
+import { auditClientEvent, clearAuth, fetchJson, getStoredAuth, storeAuth } from "./api/client";
 import { DATA_VIEWS, EMPTY_AGENT_FORM, EVENT_LABELS, TRACE_FILTERS } from "./domain/constants";
 import { AiAgentOnboardingModule } from "./aiIntakeModule.jsx";
 import { formatCost, formatDate, formatDuration, formatPayloadValue, shortId } from "./utils/formatters";
@@ -91,6 +91,7 @@ function App() {
 
   useEffect(() => {
     if (!auth?.token) return;
+    const checkingTimer = window.setTimeout(() => setAuthChecking(false), 5000);
     let active = true;
     setAuthChecking(true);
     fetchJson("/auth/me")
@@ -100,7 +101,7 @@ function App() {
         storeAuth(nextAuth);
         setAuth(nextAuth);
         setConnectionStatus("Connecting");
-        return loadAgents();
+        loadAgents();
       })
       .catch(() => {
         if (!active) return;
@@ -111,6 +112,7 @@ function App() {
       });
     return () => {
       active = false;
+      window.clearTimeout(checkingTimer);
     };
   }, [auth?.token]);
 
@@ -208,8 +210,14 @@ function App() {
   }
 
   function openAiIntake(section = "new") {
+    auditClientEvent({ eventType: "frontend_navigation", status: "success", module: "frontend/App", function: "openAiIntake", message: `Open AI intake ${section}` });
     setMode("ai_intake");
     setIntakeSection(section);
+  }
+
+  function openAudit() {
+    auditClientEvent({ eventType: "frontend_navigation", status: "success", module: "frontend/App", function: "openAudit", message: "Open audit module" });
+    setMode("audit");
   }
 
   async function importLangfuse() {
@@ -403,7 +411,7 @@ function App() {
           </button>
         </header>
         <nav className="module-nav" aria-label="Modules">
-          <button className={`module-item ${mode !== "settings" && mode !== "organization_graph" && mode !== "ai_intake" ? "active" : ""}`} type="button" onClick={backToAgents}>
+          <button className={`module-item ${mode !== "settings" && mode !== "organization_graph" && mode !== "ai_intake" && mode !== "audit" ? "active" : ""}`} type="button" onClick={backToAgents}>
             <span>Agents</span>
             <small>Onboard and monitor</small>
           </button>
@@ -424,6 +432,10 @@ function App() {
             <span>Organization Graph</span>
             <small>AI operating model</small>
           </button>
+          <button className={`module-item ${mode === "audit" ? "active" : ""}`} type="button" onClick={openAudit}>
+            <span>Audit</span>
+            <small>Execution logs</small>
+          </button>
           <button className={`module-item ${mode === "settings" ? "active" : ""}`} type="button" onClick={openSettings}>
             <span>Settings</span>
             <small>Organization master data</small>
@@ -435,7 +447,7 @@ function App() {
         <section className="topbar">
           <div>
             <div className="eyebrow">Module</div>
-            <h2>{mode === "agent_detail" ? "Agent Detail" : mode === "settings" ? "Settings" : mode === "organization_graph" ? "Organization Graph" : mode === "ai_intake" ? "AI Agent Onboarding" : "Agents"}</h2>
+            <h2>{mode === "agent_detail" ? "Agent Detail" : mode === "settings" ? "Settings" : mode === "organization_graph" ? "Organization Graph" : mode === "ai_intake" ? "AI Agent Onboarding" : mode === "audit" ? "Audit" : "Agents"}</h2>
           </div>
           <div className="topbar-actions">
             {mode === "agent_detail" && (
@@ -456,7 +468,7 @@ function App() {
                 </button>
               </>
             )}
-            {mode !== "settings" && mode !== "organization_graph" && mode !== "ai_intake" && (
+            {mode !== "settings" && mode !== "organization_graph" && mode !== "ai_intake" && mode !== "audit" && (
               <button className="command-button" type="button" onClick={openCreateDialog}>
                 <span aria-hidden="true">+</span>
                 Add Agent
@@ -479,6 +491,10 @@ function App() {
         ) : mode === "ai_intake" ? (
           <ErrorBoundary label="AI Intake failed to render">
             <AiAgentOnboardingModule section={intakeSection} onSection={setIntakeSection} selectedId={selectedIntakeId} onSelect={setSelectedIntakeId} />
+          </ErrorBoundary>
+        ) : mode === "audit" ? (
+          <ErrorBoundary label="Audit failed to render">
+            <AuditModule />
           </ErrorBoundary>
         ) : mode === "agents" ? (
           <AgentRegistry
@@ -646,6 +662,116 @@ function LoginScreen({ onLogin }) {
       </section>
     </main>
   );
+}
+
+function AuditModule() {
+  const [events, setEvents] = useState([]);
+  const [coverage, setCoverage] = useState({ functions: [] });
+  const [summary, setSummary] = useState({ total: 0, errors: 0, ignored: 0, dropped: 0, byModule: {}, byStatus: {}, byEventType: {}, byFunction: {} });
+  const [filters, setFilters] = useState({ status: "", module: "", eventType: "", function: "", query: "" });
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    loadAuditEvents();
+    const timer = window.setInterval(loadAuditEvents, 10000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  async function loadAuditEvents() {
+    try {
+      const [data, coverageData, summaryData] = await Promise.all([fetchJson("/audit/events?limit=500"), fetchJson("/audit/coverage"), fetchJson("/audit/summary")]);
+      setEvents(data);
+      setCoverage(coverageData);
+      setSummary(summaryData);
+      setError("");
+    } catch (loadError) {
+      setError(loadError.message);
+    }
+  }
+
+  const options = useMemo(() => ({
+    status: uniqueMergedValues(events, "status", summary.byStatus),
+    module: uniqueMergedValues(events, "module", summary.byModule),
+    eventType: uniqueMergedValues(events, "eventType", summary.byEventType),
+    function: uniqueMergedValues(events, "function", summary.byFunction),
+  }), [events, summary]);
+
+  const visible = useMemo(() => {
+    const query = filters.query.trim().toLowerCase();
+    return events.filter((event) =>
+      (!filters.status || event.status === filters.status) &&
+      (!filters.module || event.module === filters.module) &&
+      (!filters.eventType || event.eventType === filters.eventType) &&
+      (!filters.function || event.function === filters.function) &&
+      (!query || JSON.stringify(event).toLowerCase().includes(query)),
+    );
+  }, [events, filters]);
+
+  return (
+    <section className="audit-page">
+      <div className="aiom-header">
+        <div>
+          <h3>Audit</h3>
+        <p>Runtime execution, API, UI, and backend function-call logs. Filters are generated dynamically from the log stream.</p>
+        </div>
+        <div className="aiom-actions">
+          <button className="command-button" type="button" onClick={loadAuditEvents}>Refresh</button>
+        </div>
+      </div>
+      {error && <div className="settings-error">{error}</div>}
+      <div className="aiom-metrics">
+        <div className="metric"><span>Total Events</span><strong>{summary.total || events.length}</strong></div>
+        <div className="metric"><span>Loaded / Visible</span><strong>{events.length} / {visible.length}</strong></div>
+        <div className="metric"><span>Errors</span><strong>{summary.errors || 0}</strong></div>
+        <div className="metric"><span>Modules</span><strong>{options.module.length}</strong></div>
+        <div className="metric"><span>Covered Functions</span><strong>{coverage.functions?.length || 0}</strong></div>
+        <div className="metric"><span>Suppressed Noise</span><strong>{summary.ignored || 0}</strong></div>
+        <div className="metric"><span>Dropped Events</span><strong>{summary.dropped || 0}</strong></div>
+      </div>
+      <div className="aiom-toolbar">
+        <input value={filters.query} onChange={(event) => setFilters({ ...filters, query: event.target.value })} placeholder="Search audit events" />
+        {["status", "module", "eventType", "function"].map((key) => (
+          <select key={key} value={filters[key]} onChange={(event) => setFilters({ ...filters, [key]: event.target.value })}>
+            <option value="">{key}</option>
+            {options[key].map((item) => <option key={item} value={item}>{item}</option>)}
+          </select>
+        ))}
+      </div>
+      <div className="aiom-table-wrap">
+        <table className="aiom-table audit-table">
+          <thead>
+            <tr>
+              <th>Time</th>
+              <th>Status</th>
+              <th>Type</th>
+              <th>Module</th>
+              <th>Function</th>
+              <th>Message</th>
+              <th>Metadata</th>
+            </tr>
+          </thead>
+          <tbody>
+            {visible.map((event) => (
+              <tr key={event.id}>
+                <td>{formatDate(event.timestamp)}</td>
+                <td><span className={`aiom-badge ${event.status}`}>{event.status}</span></td>
+                <td>{event.eventType}</td>
+                <td>{event.module}</td>
+                <td>{event.function}</td>
+                <td>{event.message}</td>
+                <td><code>{JSON.stringify(event.metadata || {})}</code></td>
+              </tr>
+            ))}
+            {!visible.length && <tr><td colSpan="7">No audit events match the current filters.</td></tr>}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+}
+
+function uniqueMergedValues(rows, key, counts = {}) {
+  return [...new Set([...rows.map((row) => row[key]).filter(Boolean), ...Object.keys(counts || {})])].sort();
 }
 
 function AgentRegistry({ agents, pageError, selectedAgentId, onView, onEdit, onDelete }) {
