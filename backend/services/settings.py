@@ -25,6 +25,10 @@ class Settings(BaseSettings):
     smtp_password: str | None = None
     smtp_from_email: str | None = None
     smtp_use_tls: bool = True
+    gemini_api_key: str | None = None
+    gemini_backup_api_key: str | None = None
+    gemini_model: str = "gemini-flash-latest"
+    gemini_request_strategy: str = "race_first_success"
 
 
 @lru_cache

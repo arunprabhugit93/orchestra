@@ -4,7 +4,7 @@ from contextlib import asynccontextmanager
 from fastapi import Depends, FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
-from api.routes import agents, alerts, auth, health, imports, organization_graph, runs, settings as settings_routes
+from api.routes import agents, ai_intake, alerts, auth, health, imports, organization_graph, runs, settings as settings_routes
 from services.anomaly_detector import analyse_event
 from services.db_writer import close_db, init_db, write_event
 from services.event_bus import subscribe_events
@@ -60,6 +60,7 @@ def create_app() -> FastAPI:
     app.include_router(auth.router)
     protected = [Depends(require_session)]
     app.include_router(agents.router, dependencies=protected)
+    app.include_router(ai_intake.router, dependencies=protected)
     app.include_router(runs.router, dependencies=protected)
     app.include_router(alerts.router, dependencies=protected)
     app.include_router(imports.router, dependencies=protected)

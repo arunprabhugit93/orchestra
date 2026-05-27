@@ -170,6 +170,38 @@ CREATE TABLE IF NOT EXISTS login_session (
 
 CREATE INDEX IF NOT EXISTS idx_login_session_email ON login_session(email);
 CREATE INDEX IF NOT EXISTS idx_login_session_expires ON login_session(expires_at);
+
+CREATE TABLE IF NOT EXISTS ai_intake_request (
+    id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    request_number TEXT NOT NULL,
+    title TEXT NOT NULL,
+    department TEXT,
+    owner TEXT,
+    source_channel TEXT NOT NULL DEFAULT 'manual',
+    status TEXT NOT NULL DEFAULT 'Draft',
+    priority TEXT,
+    risk_level TEXT,
+    qualification_score INTEGER NOT NULL DEFAULT 0,
+    readiness_score INTEGER NOT NULL DEFAULT 0,
+    estimated_complexity TEXT,
+    estimated_roi TEXT,
+    estimated_token_consumption TEXT,
+    request_payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+    recommendations JSONB NOT NULL DEFAULT '{}'::jsonb,
+    lifecycle_history JSONB NOT NULL DEFAULT '[]'::jsonb,
+    created_by TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_by TEXT,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    submitted_at TIMESTAMPTZ,
+    archived_at TIMESTAMPTZ,
+    UNIQUE (tenant_id, request_number)
+);
+
+CREATE INDEX IF NOT EXISTS idx_ai_intake_tenant_status ON ai_intake_request(tenant_id, status);
+CREATE INDEX IF NOT EXISTS idx_ai_intake_department ON ai_intake_request(tenant_id, department);
+CREATE INDEX IF NOT EXISTS idx_ai_intake_created ON ai_intake_request(created_at DESC);
 """
 
 

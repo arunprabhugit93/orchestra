@@ -21,6 +21,28 @@ class OtpVerifyRequest(BaseModel):
     otp: str
 
 
+class AiIntakeRequestPayload(BaseModel):
+    title: str
+    department: str | None = None
+    owner: str | None = None
+    status: str = "Draft"
+    source_channel: str = "manual"
+    payload: dict = Field(default_factory=dict)
+
+
+class AiIntakeUpdatePayload(BaseModel):
+    title: str | None = None
+    department: str | None = None
+    owner: str | None = None
+    status: str | None = None
+    payload: dict | None = None
+
+
+class AiQualificationCommentRequest(BaseModel):
+    request: dict = Field(default_factory=dict)
+    enterprise_context: dict = Field(default_factory=dict)
+
+
 class AgentNodeMappingRequest(BaseModel):
     node_id: str
     placement_type: str = "Primary"

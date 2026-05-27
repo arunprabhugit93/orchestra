@@ -1,0 +1,27 @@
+Business Request
+      ↓
+Use Case Qualification
+      ↓
+Governance & Risk Review
+      ↓
+Architecture Design
+      ↓
+Identity & Access Setup
+      ↓
+Knowledge/Data Onboarding
+      ↓
+Behavior & Workflow Definition
+      ↓
+Testing & Simulation
+      ↓
+Pilot Deployment
+      ↓
+Operational Readiness
+      ↓
+Production Go-Live
+      ↓
+Continuous Monitoring
+      ↓
+Optimization & Governance
+      ↓
+Retirement

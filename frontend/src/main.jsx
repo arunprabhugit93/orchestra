@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { clearAuth, fetchJson, getStoredAuth, storeAuth } from "./api/client";
 import { DATA_VIEWS, EMPTY_AGENT_FORM, EVENT_LABELS, TRACE_FILTERS } from "./domain/constants";
+import { AiAgentOnboardingModule } from "./aiIntakeModule.jsx";
 import { formatCost, formatDate, formatDuration, formatPayloadValue, shortId } from "./utils/formatters";
 import { WS_URL } from "./config";
 import "../styles.css";
@@ -32,6 +33,19 @@ class ErrorBoundary extends React.Component {
   }
 }
 
+const AI_INTAKE_SECTIONS = [
+  { id: "new", label: "New Request" },
+  { id: "requests", label: "Requests" },
+  { id: "qualification", label: "Qualification Queue" },
+  { id: "detail", label: "Request Detail / Impact View" },
+  { id: "departments", label: "Departments" },
+  { id: "systems", label: "Systems" },
+  { id: "touchpoints", label: "Integration Touchpoints" },
+  { id: "dataDomains", label: "Data Domains" },
+  { id: "userGroups", label: "User Groups" },
+  { id: "processAreas", label: "Process Areas" },
+];
+
 function App() {
   const [auth, setAuth] = useState(() => getStoredAuth());
   const [authChecking, setAuthChecking] = useState(Boolean(getStoredAuth()?.token));
@@ -53,6 +67,8 @@ function App() {
   const [agentSubmitting, setAgentSubmitting] = useState(false);
   const [pageError, setPageError] = useState("");
   const [graphSection, setGraphSection] = useState("overview");
+  const [intakeSection, setIntakeSection] = useState("new");
+  const [selectedIntakeId, setSelectedIntakeId] = useState("");
 
   const selectedAgent = agents.find((agent) => agent.agent_id === selectedAgentId) || null;
   const selectedRun = runs.find((run) => run.run_id === selectedRunId && run.agent_id === selectedRunAgentId) || null;
@@ -189,6 +205,11 @@ function App() {
 
   function openOrganizationGraph() {
     setMode("organization_graph");
+  }
+
+  function openAiIntake(section = "new") {
+    setMode("ai_intake");
+    setIntakeSection(section);
   }
 
   async function importLangfuse() {
@@ -382,10 +403,23 @@ function App() {
           </button>
         </header>
         <nav className="module-nav" aria-label="Modules">
-          <button className={`module-item ${mode !== "settings" && mode !== "organization_graph" ? "active" : ""}`} type="button" onClick={backToAgents}>
+          <button className={`module-item ${mode !== "settings" && mode !== "organization_graph" && mode !== "ai_intake" ? "active" : ""}`} type="button" onClick={backToAgents}>
             <span>Agents</span>
             <small>Onboard and monitor</small>
           </button>
+          <button className={`module-item ${mode === "ai_intake" ? "active" : ""}`} type="button" onClick={() => openAiIntake("new")}>
+            <span>AI Agent Onboarding</span>
+            <small>Requests and impact</small>
+          </button>
+          {mode === "ai_intake" && (
+            <div className="submenu-list">
+              {AI_INTAKE_SECTIONS.map((item) => (
+                <button key={item.id} className={intakeSection === item.id ? "active" : ""} type="button" onClick={() => setIntakeSection(item.id)}>
+                  {item.label}
+                </button>
+              ))}
+            </div>
+          )}
           <button className={`module-item ${mode === "organization_graph" ? "active" : ""}`} type="button" onClick={openOrganizationGraph}>
             <span>Organization Graph</span>
             <small>AI operating model</small>
@@ -401,7 +435,7 @@ function App() {
         <section className="topbar">
           <div>
             <div className="eyebrow">Module</div>
-            <h2>{mode === "agent_detail" ? "Agent Detail" : mode === "settings" ? "Settings" : mode === "organization_graph" ? "Organization Graph" : "Agents"}</h2>
+            <h2>{mode === "agent_detail" ? "Agent Detail" : mode === "settings" ? "Settings" : mode === "organization_graph" ? "Organization Graph" : mode === "ai_intake" ? "AI Agent Onboarding" : "Agents"}</h2>
           </div>
           <div className="topbar-actions">
             {mode === "agent_detail" && (
@@ -422,7 +456,7 @@ function App() {
                 </button>
               </>
             )}
-            {mode !== "settings" && mode !== "organization_graph" && (
+            {mode !== "settings" && mode !== "organization_graph" && mode !== "ai_intake" && (
               <button className="command-button" type="button" onClick={openCreateDialog}>
                 <span aria-hidden="true">+</span>
                 Add Agent
@@ -441,6 +475,10 @@ function App() {
         ) : mode === "organization_graph" ? (
           <ErrorBoundary label="Organization Graph failed to render">
             <OrganizationGraphModule section={graphSection} onSection={setGraphSection} onOpenSettings={openSettings} onOpenAgent={openEditDialog} />
+          </ErrorBoundary>
+        ) : mode === "ai_intake" ? (
+          <ErrorBoundary label="AI Intake failed to render">
+            <AiAgentOnboardingModule section={intakeSection} onSection={setIntakeSection} selectedId={selectedIntakeId} onSelect={setSelectedIntakeId} />
           </ErrorBoundary>
         ) : mode === "agents" ? (
           <AgentRegistry
